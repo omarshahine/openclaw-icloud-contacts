@@ -33,7 +33,8 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
 1. Turn on two-factor authentication for your Apple Account if it is not already on.
 2. Create an app-specific password at <https://account.apple.com> → Sign-In and Security →
    App-Specific Passwords. Copy the `xxxx-xxxx-xxxx-xxxx` value.
-3. Make it available to the gateway, e.g. `export ICLOUD_APP_PASSWORD="xxxx-xxxx-xxxx-xxxx"`.
+3. Make it available to the gateway as an environment variable named `ICLOUD_APP_PASSWORD` (or store it
+   in `~/.openclaw/secrets.json` and reference it with a SecretRef, see below).
 4. Configure the plugin in `openclaw.json`:
 
    ```jsonc
@@ -82,6 +83,9 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
   Unknown properties are preserved on update.
 - **Photos** are external URIs on iCloud; `photoUrl` is always returned, `includePhoto=true` fetches
   it (authenticated) and returns base64. Photos larger than 5 MB are not returned.
+- **Credential hygiene.** The Apple ID and app password are sent only to hosts within the configured
+  server's domain (`*.icloud.com` by default). Redirects to other hosts are refused, and photo URLs on
+  other hosts are not fetched, so a shared card cannot steer your credentials elsewhere.
 - **Groups** are Apple `X-ADDRESSBOOKSERVER-KIND:group` cards; membership is by contact UID.
 - **Concurrency.** Writes send `If-Match`; one re-read + retry on 412, then `conflict`.
 - **Rate limits.** iCloud throttles roughly 15-20 writes/minute (503). The plugin has no bulk write
@@ -110,7 +114,7 @@ Live test against a real account (syncs the whole book read-only, then creates a
 `[openclaw-test]` contact and group):
 
 ```bash
-ICLOUD_INTEGRATION=1 ICLOUD_TEST_APPLE_ID=you@icloud.com ICLOUD_TEST_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx npm run test:integration
+ICLOUD_INTEGRATION=1 ICLOUD_TEST_APPLE_ID=you@icloud.com ICLOUD_TEST_APP_PASSWORD=<app-specific password> npm run test:integration
 ```
 
 ## Not in v1

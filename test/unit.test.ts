@@ -266,3 +266,32 @@ describe("sanitize + config", () => {
     expect(() => resolveConfig({ appleId: "a@b.com" }, {})).toThrow(/appPassword/);
   });
 });
+
+describe("credential trust boundary", () => {
+  it("only sends credentials to the server's domain, refuses foreign redirects and photo hosts", async () => {
+    const { DavClient, baseDomain } = await import("../src/dav/client.js");
+    expect(baseDomain("p42-contacts.icloud.com")).toBe("icloud.com");
+    expect(baseDomain("contacts.icloud.com.cn")).toBe("icloud.com.cn");
+    expect(baseDomain("localhost")).toBe("localhost");
+    const seen: string[] = [];
+    const client = new DavClient({
+      serverUrl: "https://contacts.icloud.com",
+      username: "u",
+      password: "p",
+      fetch: async (url) => {
+        seen.push(url);
+        if (url.startsWith("https://contacts.icloud.com/")) return new Response(null, { status: 302, headers: { Location: "https://evil.example.net/steal" } });
+        if (url.startsWith("https://p42-contacts.icloud.com/")) return new Response("ok", { status: 200 });
+        return new Response("should not be reached", { status: 200 });
+      },
+    });
+    expect(client.isTrustedUrl("https://p99-contacts.icloud.com/x")).toBe(true);
+    expect(client.isTrustedUrl("https://icloud.com.evil.example/x")).toBe(false);
+    expect(client.isTrustedUrl("http://p42-contacts.icloud.com/x")).toBe(false);
+    await expect(client.request("GET", "https://contacts.icloud.com/")).rejects.toThrow(/untrusted host evil.example.net/);
+    await expect(client.request("GET", "https://evil.example.net/")).rejects.toThrow(/untrusted host/);
+    expect(await client.getBinary("https://evil.example.net/photo.jpg")).toBeUndefined();
+    expect(seen.some((u) => u.includes("evil.example.net"))).toBe(false);
+    expect((await client.request("GET", "https://p42-contacts.icloud.com/ok")).text).toBe("ok");
+  });
+});

@@ -34,8 +34,22 @@ export interface DavResponse {
 
 const MAX_REDIRECTS = 5;
 
+/**
+ * Registrable-domain heuristic: the last two labels, or three for
+ * two-part public suffixes such as .com.cn / .co.uk.
+ */
+export function baseDomain(hostname: string): string {
+  const parts = hostname.toLowerCase().split(".");
+  if (parts.length <= 2) return parts.join(".");
+  const tld2 = parts.slice(-2).join(".");
+  if (/^(com|co|org|net|gov|edu|ac)\.[a-z]{2}$/.test(tld2)) return parts.slice(-3).join(".");
+  return tld2;
+}
+
 export class DavClient {
   readonly serverUrl: string;
+  /** Credentials are only ever sent to hosts within this registrable domain (from serverUrl). */
+  readonly trustedDomain: string;
   private readonly authHeader: string;
   private readonly fetchImpl: FetchLike;
   private readonly timeoutMs: number;
@@ -47,10 +61,23 @@ export class DavClient {
       throw new DavError("invalid_input", "serverUrl must use https (credentials are sent with HTTP Basic auth)");
     }
     this.serverUrl = url.toString();
+    this.trustedDomain = baseDomain(url.hostname);
     this.authHeader = "Basic " + Buffer.from(`${opts.username}:${opts.password}`, "utf8").toString("base64");
     this.fetchImpl = opts.fetch ?? ((input, init) => fetch(input, init));
     this.timeoutMs = opts.timeoutMs ?? 30_000;
     this.userAgent = opts.userAgent ?? "openclaw-icloud-contacts/0.1";
+  }
+
+  /** True if credentials may be sent to this URL (same registrable domain as serverUrl, https). */
+  isTrustedUrl(url: string): boolean {
+    try {
+      const u = new URL(url);
+      if (u.protocol !== "https:" && !(u.hostname === "localhost" || u.hostname === "127.0.0.1")) return false;
+      const host = u.hostname.toLowerCase();
+      return host === this.trustedDomain || host.endsWith("." + this.trustedDomain);
+    } catch {
+      return false;
+    }
   }
 
   /** Resolve a possibly-relative href against the server or a base URL. */
@@ -66,6 +93,9 @@ export class DavClient {
     let current = url;
     let attempt = 0;
     let redirects = 0;
+    if (!this.isTrustedUrl(current)) {
+      throw new DavError("server_error", `Refusing to send credentials to untrusted host ${safeHost(current)} (trusted: *.${this.trustedDomain})`);
+    }
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const headers: Record<string, string> = {
@@ -106,7 +136,11 @@ export class DavClient {
           throw new DavError("server_error", `Too many redirects or missing Location (status ${res.status})`, res.status);
         }
         redirects++;
-        current = new URL(loc, current).toString();
+        const next = new URL(loc, current).toString();
+        if (!this.isTrustedUrl(next)) {
+          throw new DavError("server_error", `Refusing to follow redirect to untrusted host ${safeHost(next)} (trusted: *.${this.trustedDomain})`);
+        }
+        current = next;
         continue;
       }
 
@@ -172,9 +206,13 @@ export class DavClient {
     return { etag: res.headers.get("etag") ?? undefined };
   }
 
-  /** Authenticated binary GET (photos). Returns undefined on any non-2xx. */
+  /**
+   * Authenticated binary GET (photos). Credentials are sent only to trusted
+   * hosts and redirects are never followed; untrusted URLs return undefined.
+   */
   async getBinary(url: string, maxBytes = 5 * 1024 * 1024): Promise<{ data: Buffer; contentType?: string } | undefined> {
-    const res = await this.fetchImpl(url, { method: "GET", headers: { Authorization: this.authHeader, "User-Agent": this.userAgent, Accept: "image/*,*/*;q=0.5" }, redirect: "follow" });
+    if (!this.isTrustedUrl(url)) return undefined;
+    const res = await this.fetchImpl(url, { method: "GET", headers: { Authorization: this.authHeader, "User-Agent": this.userAgent, Accept: "image/*,*/*;q=0.5" }, redirect: "manual" });
     if (!res.ok) return undefined;
     const ab = await res.arrayBuffer();
     if (ab.byteLength > maxBytes) throw new DavError("invalid_input", `Binary larger than ${Math.round(maxBytes / 1024 / 1024)} MB; not returned`);
@@ -195,6 +233,14 @@ function sleep(ms: number): Promise<void> {
 function describe(e: unknown): string {
   if (e instanceof Error) return e.name === "AbortError" ? "timeout" : e.message;
   return String(e);
+}
+
+function safeHost(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "<invalid-url>";
+  }
 }
 
 /** Path only, so error messages never include a userinfo component. */

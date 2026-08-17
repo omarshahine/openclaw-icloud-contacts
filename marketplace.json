@@ -6,7 +6,7 @@
       "name": "openclaw-icloud-contacts",
       "source": ".",
       "description": "Read and write Apple iCloud Contacts over CardDAV (Apple ID + app-specific password)",
-      "version": "0.1.0"
+      "version": "0.1.1"
     }
   ]
 }
