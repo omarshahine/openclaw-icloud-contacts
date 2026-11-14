@@ -38,6 +38,8 @@ only visible existing contacts can be edited/deleted. The in-memory sync still r
 Duplicate allowed display names fail closed. Scoped writes refresh membership first; reads may use
 the 10-second cache. Membership checking and contact writes are separate CardDAV requests, not an
 atomic server ACL.
+Automatic scope/cache refresh does not rebase a write onto a changed contact: it returns `conflict`
+against the previously cached version, requiring a new read and review.
 
 ## Result shapes
 

@@ -71,6 +71,32 @@ describe("vCard write boundaries", () => {
 });
 
 describe("configured group boundary", () => {
+  it.each([
+    { operation: "update", groups: ["Family"] },
+    { operation: "delete", groups: ["Family"] },
+    { operation: "update", groups: [] },
+    { operation: "delete", groups: [] },
+  ])("does not rebase a reviewed contact during automatic refresh: $operation, groups=$groups", async ({ operation, groups }) => {
+    const { ctx, fake } = setup(groups);
+    await handleGet(ctx, { id: "A" });
+    ctx.store.opts.minRefreshIntervalMs = 0;
+    fake.seed("a.vcf", vcard({ uid: "A", given: "Allowed", tels: [["mobile", "111"], ["work", "222"]] }));
+    const action = operation === "update" ? handleUpdate(ctx, { id: "A", phones: [{ label: "mobile", value: "333" }] }) : handleDelete(ctx, { id: "A" });
+    await expect(action).rejects.toMatchObject({ code: "conflict" });
+    expect(fake.objects.get(`${fake.cardUrl}a.vcf`)!.text).toContain("222");
+    expect(fake.log.filter((request) => ["PUT", "DELETE"].includes(request.method))).toHaveLength(0);
+  });
+
+  it("allows a freshly authorized scoped write when the reviewed contact is unchanged", async () => {
+    const { ctx, fake } = setup(["Family"]);
+    await handleGet(ctx, { id: "A" });
+    const updated = await handleUpdate(ctx, { id: "A", notes: "intentional change" });
+    expect(updated.contact.notes).toBe("intentional change");
+    await expect(handleDelete(ctx, { id: "A" })).resolves.toMatchObject({ deleted: true });
+    expect(fake.log.filter((request) => request.method === "PUT")).toHaveLength(1);
+    expect(fake.log.filter((request) => request.method === "DELETE")).toHaveLength(1);
+  });
+
   it.each(["update", "delete"] as const)("refreshes membership before a scoped %s even when the contact ETag is unchanged", async (operation) => {
     const { ctx, fake } = setup(["Family"]);
     await handleGet(ctx, { id: "A" });

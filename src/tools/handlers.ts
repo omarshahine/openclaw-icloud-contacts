@@ -144,6 +144,7 @@ export async function handleSearch(ctx: Context, raw: SearchParams) {
 
 async function locate(ctx: Context, id: string, forMutation = false): Promise<Entry> {
   if (!id || !id.trim()) throw invalidInput("id is required");
+  const reviewed = forMutation ? ctx.store.byUid(id.trim()) : undefined;
   await ensure(ctx, forMutation && ctx.config.groups.length > 0);
   let e = ctx.store.byUid(id.trim());
   if (!e) {
@@ -154,6 +155,9 @@ async function locate(ctx: Context, id: string, forMutation = false): Promise<En
   if (!e || !e.contact) throw notFound(`No contact with id "${id}"`);
   if (ctx.config.groups.length) {
     if (!contactGroups(ctx, e.contact.id).length) throw notFound(`No contact with id "${id}" in the allowed groups`);
+  }
+  if (reviewed && (reviewed.href !== e.href || reviewed.etag !== e.etag || reviewed.text !== e.text)) {
+    throw new DavError("conflict", "Contact changed while refreshing scope/cache; reread and review before writing");
   }
   return e;
 }
