@@ -5,7 +5,7 @@ OpenClaw plugin: Apple iCloud Contacts over CardDAV (Apple ID + app-specific pas
 ## Project Structure
 
 - `src/index.ts` — plugin entry (`definePluginEntry`), registers `icloud_contacts_*` tools; write tools skipped when `readOnly`
-- `src/config.ts` — config + SecretRef resolution; `groups` allowlist, `defaultLimit`, `maxContacts`
+- `src/config.ts` — host-prepared config + fail-closed unresolved SecretInputs; `groups` allowlist, `defaultLimit`, `maxContacts`
 - `src/dav/` — `xml.ts` (parser + CardDAV bodies: propfind, sync-collection, multiget, addressbook-query), `client.ts` (fetch, retry, error mapping, `getBinary` for photos), `discovery.ts` (principal → addressbook-home-set → `card`, cached `Session`), `store.ts` (sync-token cache, multiget in chunks, uid index, group index)
 - `src/vcard/` — `component.ts` (vCard 3.0 content lines, `itemN.` groups, vCard escaping), `contact.ts` (Contact JSON ⇄ vCard incl. Apple labels/sentinels, ADR/BDAY/X-ABDATE/X-ABRELATEDNAMES/IMPP/X-SOCIALPROFILE/PHOTO, groups), `search.ts` (client-side matching)
 - `src/tools/` — `schemas.ts` (typebox; optional params nullable), `handlers.ts`

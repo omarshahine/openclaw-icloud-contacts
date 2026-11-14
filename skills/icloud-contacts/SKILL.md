@@ -20,6 +20,16 @@ Tools talk directly to iCloud's CardDAV service with the configured Apple ID. Th
 synced into a local cache on first use (a few seconds for a few hundred contacts) and kept fresh
 with cheap delta syncs; searches run locally and are case-insensitive.
 
+## Configuration recovery
+
+OpenClaw owns `appPassword` SecretInput preparation (`env`, `file`, `exec`, `store`) at startup/reload.
+The plugin consumes only the prepared value; never read credential stores/files, echo a password,
+or replace an unresolved explicit reference with an ambient credential. Native preparation is
+verified on host 2026.11.1; older-host support depends on that manifest contract.
+After a configuration fix, have the configuration owner complete the supported reload and confirm
+a fresh invocation. Configuration errors are cached for that plugin registration. Missing `appleId`
+is a separate missing-email/config-injection observation, not evidence that a password was rejected.
+
 ## Tools
 
 | Tool | Use for |

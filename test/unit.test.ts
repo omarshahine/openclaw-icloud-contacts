@@ -257,8 +257,7 @@ describe("sanitize + config", () => {
     expect(m.emails[0]).toContain("a@b");
   });
   it("resolves config with defaults", () => {
-    process.env.T_PW = "pw";
-    const c = resolveConfig({ appleId: "a@b.com", appPassword: "${T_PW}", groups: ["Family"], defaultLimit: 10 });
+    const c = resolveConfig({ appleId: "a@b.com", appPassword: "synthetic-materialized-password", groups: ["Family"], defaultLimit: 10 }, {});
     expect(c.serverUrl).toBe("https://contacts.icloud.com");
     expect(c.groups).toEqual(["Family"]);
     expect(c.defaultLimit).toBe(10);

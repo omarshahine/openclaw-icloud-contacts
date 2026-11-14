@@ -33,8 +33,8 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
 1. Turn on two-factor authentication for your Apple Account if it is not already on.
 2. Create an app-specific password at <https://account.apple.com> → Sign-In and Security →
    App-Specific Passwords. Copy the `xxxx-xxxx-xxxx-xxxx` value.
-3. Make it available to the gateway as an environment variable named `ICLOUD_APP_PASSWORD` (or store it
-   in `~/.openclaw/secrets.json` and reference it with a SecretRef, see below).
+3. Make it available through an OpenClaw-managed secret provider, or through the gateway environment
+   as `ICLOUD_APP_PASSWORD`. The plugin does not read credential stores or provider files itself.
 4. Configure the plugin in `openclaw.json`:
 
    ```jsonc
@@ -45,7 +45,7 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
            "enabled": true,
            "config": {
              "appleId": "you@icloud.com",
-             "appPassword": "${ICLOUD_APP_PASSWORD}"
+             "appPassword": { "source": "env", "provider": "default", "id": "ICLOUD_APP_PASSWORD" }
            }
          }
        }
@@ -53,10 +53,29 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
    }
    ```
 
-   `appPassword` also accepts a SecretRef (`{"source":"env","provider":"env","id":"ICLOUD_APP_PASSWORD"}`
-   or `{"source":"file","provider":"secrets","id":"/icloud/appPassword"}` into `~/.openclaw/secrets.json`).
-   Without config, `ICLOUD_APPLE_ID` and `ICLOUD_APP_PASSWORD` environment variables are used.
+   `appPassword` is a native SecretInput. OpenClaw validates and materializes `env`, `file`, `exec`
+   and `store` references before injecting the plugin's runtime config. For example,
+   `{"source":"store","provider":"default","id":"ICLOUD_APP_PASSWORD"}` uses the host's default
+   protected store; custom aliases and file/exec providers must be configured in OpenClaw.
+   `${ICLOUD_APP_PASSWORD}` is also a host-managed input. Source config retains references;
+   the plugin uses the materialized password only in memory and request authentication, never
+   in tool results or configuration logs. An explicit unresolved/invalid reference or empty value
+   fails closed; it never falls back to another credential.
+
+   When the corresponding config field is omitted, `ICLOUD_APPLE_ID` or `ICLOUD_APP_PASSWORD`
+   from the gateway environment remains a legacy fallback.
    The same app-specific password works for the calendar plugin.
+
+   Native secret preparation is verified on OpenClaw **2026.11.1**. The existing advertised minimum
+   is unchanged; support for this manifest contract on older hosts has not been established.
+   References require host support for `configContracts.secretInputs`; the plugin will not bypass
+   missing support by reading provider files or a protected store itself.
+
+5. Apply configuration or credential changes through OpenClaw's supported reload/restart lifecycle
+   and confirm the new runtime handles the next call. The plugin caches its context or initial
+   configuration error for that registration; it does not implement live credential rotation.
+   Scheduling a reload is not proof that a reload completed. An `appleId is not configured` error
+   means no usable email reached that registration; it does not establish a password-provider failure.
 
 ## Configuration
 
