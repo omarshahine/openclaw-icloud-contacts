@@ -35,6 +35,9 @@ with cheap delta syncs; searches run locally and are case-insensitive.
 Write tools are absent when the plugin is configured read-only.
 With a configured `groups` allowlist, contact creation and group mutations are disabled;
 only visible existing contacts can be edited/deleted. The in-memory sync still reads the full book.
+Duplicate allowed display names fail closed. Scoped writes refresh membership first; reads may use
+the 10-second cache. Membership checking and contact writes are separate CardDAV requests, not an
+atomic server ACL.
 
 ## Result shapes
 

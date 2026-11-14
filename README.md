@@ -94,6 +94,10 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
   With a configured allowlist, group lists, contact group names and counts expose only allowed groups;
   contact creation and group changes fail closed. Existing visible contacts remain editable/deletable.
   This is a tool boundary, not a server-side ACL: the in-memory sync still contains the full address book.
+  Duplicate allowed display names fail closed instead of combining groups. Scoped update/delete
+  refresh membership before writing, waiting out older in-flight syncs. Read tools may use the
+  10-second cache. CardDAV cannot atomically check a group card and write a separate contact card:
+  removal after the fresh membership check can still race the conditional contact write.
 - **Concurrency.** Updates/deletes require a strong ETag and send `If-Match`; missing/weak ETags
   and concurrent modifications return `conflict` without an automatic write retry.
   Re-read and review the new state before explicitly deciding on another write.

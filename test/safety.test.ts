@@ -71,6 +71,58 @@ describe("vCard write boundaries", () => {
 });
 
 describe("configured group boundary", () => {
+  it.each(["update", "delete"] as const)("refreshes membership before a scoped %s even when the contact ETag is unchanged", async (operation) => {
+    const { ctx, fake } = setup(["Family"]);
+    await handleGet(ctx, { id: "A" });
+    fake.seed("g.vcf", groupCard("G", "Family", []));
+    const action = operation === "update" ? handleUpdate(ctx, { id: "A", notes: "must not write" }) : handleDelete(ctx, { id: "A" });
+    await expect(action).rejects.toMatchObject({ code: "not_found" });
+    expect(fake.log.filter((request) => ["PUT", "DELETE"].includes(request.method))).toHaveLength(0);
+  });
+
+  it("does not mistake an already in-flight stale refresh for a fresh mutation scope check", async () => {
+    let hold = false;
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const snapshotReady = new Promise<void>((resolve) => { started = resolve; });
+    const { ctx, fake } = setup(["Family"], (transport) => async (url, init) => {
+      const response = await transport(url, init);
+      if (hold && init.method === "REPORT" && String(init.body).includes("sync-collection")) {
+        hold = false;
+        started();
+        await gate;
+      }
+      return response;
+    });
+    await handleGet(ctx, { id: "A" });
+    hold = true;
+    const pending = ctx.store.refresh(true);
+    await snapshotReady;
+    fake.seed("g.vcf", groupCard("G", "Family", []));
+    const assertion = expect(handleUpdate(ctx, { id: "A", notes: "must not write" })).rejects.toMatchObject({ code: "not_found" });
+    release();
+    await Promise.all([pending, assertion]);
+    expect(fake.log.filter((request) => request.method === "PUT")).toHaveLength(0);
+  });
+
+  it("fails closed on duplicate allowed display names rather than unioning their members", async () => {
+    const { ctx, fake } = setup(["Family"]);
+    fake.seed("duplicate.vcf", groupCard("G2", "family", ["B"]));
+    await expect(handleList(ctx, {})).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(handleGet(ctx, { id: "B" })).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(handleUpdate(ctx, { id: "A", notes: "must not write" })).rejects.toMatchObject({ code: "invalid_input" });
+    expect(fake.log.filter((request) => request.method === "PUT")).toHaveLength(0);
+  });
+
+  it("keeps the selected group's identity when its name is another group's id", async () => {
+    const { ctx, fake } = setup();
+    fake.seed("collision.vcf", groupCard("Family", "Other", ["B"]));
+    const result = await handleGroups(ctx, { action: "members", group: "G" });
+    expect(result.group).toMatchObject({ id: "G", name: "Family" });
+    expect(result.contacts!.map((contact) => contact.id)).toEqual(["A"]);
+  });
+
   it("does not reveal hidden groups, counts or decorations", async () => {
     const { ctx } = setup(["Family"]);
     const list = await handleList(ctx, {});

@@ -41,29 +41,49 @@ async function ensure(ctx: Context, force = false): Promise<void> {
 function resolveGroup(ctx: Context, nameOrId: string): GroupCard {
   const needle = nameOrId.trim().toLowerCase();
   const groups = visibleGroups(ctx);
-  const g = groups.find((x) => x.id.toLowerCase() === needle) ?? groups.find((x) => x.name.toLowerCase() === needle);
+  const byId = groups.filter((group) => group.id.toLowerCase() === needle);
+  const byName = groups.filter((group) => group.name.toLowerCase() === needle);
+  const matches = byId.length ? byId : byName;
+  if (matches.length > 1) throw invalidInput("Ambiguous group selector; use a unique group id");
+  const g = matches[0];
   if (!g) throw notFound(`Group "${nameOrId}" not found. Available: ${groups.map((x) => x.name).join(", ") || "none"}`);
   return g;
 }
 
 function visibleGroups(ctx: Context): GroupCard[] {
   const allow = ctx.config.groups.map((name) => name.toLowerCase());
-  return ctx.store.groups().filter((group) => !allow.length || allow.includes(group.name.toLowerCase()));
+  const groups = ctx.store.groups();
+  for (const name of allow) {
+    if (groups.filter((group) => group.name.toLowerCase() === name).length > 1) {
+      throw invalidInput("Configured group name is ambiguous; resolve duplicate group names before using this allowlist");
+    }
+  }
+  return groups.filter((group) => !allow.length || allow.includes(group.name.toLowerCase()));
 }
 
-function contactGroups(ctx: Context, id: string, index = ctx.store.groupIndex()): string[] {
-  const allow = ctx.config.groups.map((name) => name.toLowerCase());
-  return (index.get(id) ?? []).filter((name) => !allow.length || allow.includes(name.toLowerCase()));
+function scopedGroupIndex(ctx: Context): Map<string, string[]> {
+  const index = new Map<string, string[]>();
+  for (const group of visibleGroups(ctx)) {
+    for (const id of group.memberIds) {
+      const names = index.get(id) ?? [];
+      names.push(group.name);
+      index.set(id, names);
+    }
+  }
+  return index;
+}
+
+function contactGroups(ctx: Context, id: string, index = scopedGroupIndex(ctx)): string[] {
+  return index.get(id) ?? [];
 }
 
 /** Contacts visible under the config allowlist and optional group filter, decorated with group names. */
-function visibleContacts(ctx: Context, groupFilter?: string | null): Contact[] {
-  const idx = ctx.store.groupIndex();
+function visibleContacts(ctx: Context, groupFilter?: string | GroupCard | null): Contact[] {
+  const idx = scopedGroupIndex(ctx);
   let entries = ctx.store.contacts();
-  const allow = ctx.config.groups.map((g) => g.toLowerCase());
-  if (allow.length) entries = entries.filter((e) => (idx.get(e.contact!.id) ?? []).some((n) => allow.includes(n.toLowerCase())));
+  if (ctx.config.groups.length) entries = entries.filter((e) => idx.has(e.contact!.id));
   if (groupFilter) {
-    const g = resolveGroup(ctx, groupFilter);
+    const g = typeof groupFilter === "string" ? resolveGroup(ctx, groupFilter) : groupFilter;
     const members = new Set(g.memberIds);
     entries = entries.filter((e) => members.has(e.contact!.id));
   }
@@ -122,9 +142,9 @@ export async function handleSearch(ctx: Context, raw: SearchParams) {
   return { query: p.query, field, matched: hits.length, count: Math.min(hits.length, limit), truncated: hits.length > limit, contacts: hits.slice(0, limit).map((c) => shape(c, p.fields)) };
 }
 
-async function locate(ctx: Context, id: string): Promise<Entry> {
+async function locate(ctx: Context, id: string, forMutation = false): Promise<Entry> {
   if (!id || !id.trim()) throw invalidInput("id is required");
-  await ensure(ctx);
+  await ensure(ctx, forMutation && ctx.config.groups.length > 0);
   let e = ctx.store.byUid(id.trim());
   if (!e) {
     // Maybe created elsewhere seconds ago; force one refresh.
@@ -132,10 +152,8 @@ async function locate(ctx: Context, id: string): Promise<Entry> {
     e = ctx.store.byUid(id.trim());
   }
   if (!e || !e.contact) throw notFound(`No contact with id "${id}"`);
-  const allow = ctx.config.groups.map((g) => g.toLowerCase());
-  if (allow.length) {
-    const groups = ctx.store.groupIndex().get(e.contact.id) ?? [];
-    if (!groups.some((n) => allow.includes(n.toLowerCase()))) throw notFound(`No contact with id "${id}" in the allowed groups`);
+  if (ctx.config.groups.length) {
+    if (!contactGroups(ctx, e.contact.id).length) throw notFound(`No contact with id "${id}" in the allowed groups`);
   }
   return e;
 }
@@ -224,7 +242,7 @@ export async function handleUpdate(ctx: Context, raw: { id: string } & ContactIn
   const { id, ...rest } = raw;
   const input = normaliseInput(rest as ContactInput & Record<string, unknown>);
   if (Object.keys(input).length === 0) throw invalidInput("Nothing to update: provide at least one field");
-  const e = await locate(ctx, id);
+  const e = await locate(ctx, id, true);
   assertWritable(ctx);
   const vcard = patchContact(e.text, e.contact!, input);
   await write(ctx, () => ctx.session.client.put(e.href, vcard, { ifMatch: e.etag }));
@@ -238,7 +256,7 @@ export async function handleUpdate(ctx: Context, raw: { id: string } & ContactIn
 }
 
 export async function handleDelete(ctx: Context, params: { id: string }): Promise<{ deleted: true; id: string; fullName: string }> {
-  const e = await locate(ctx, params.id);
+  const e = await locate(ctx, params.id, true);
   assertWritable(ctx);
   await write(ctx, () => ctx.session.client.delete(e.href, { ifMatch: e.etag }));
   const fullName = e.contact!.fullName;
@@ -271,7 +289,7 @@ export async function handleGroups(ctx: Context, raw: GroupsParams) {
     case "members": {
       if (!p.group) throw invalidInput("group is required for members");
       const g = resolveGroup(ctx, p.group);
-      const members = visibleContacts(ctx, g.name).sort(sortByName);
+      const members = visibleContacts(ctx, g).sort(sortByName);
       const limit = p.limit ?? ctx.config.defaultLimit;
       return { group: { id: g.id, name: g.name }, matched: members.length, count: Math.min(members.length, limit), truncated: members.length > limit, contacts: members.slice(0, limit).map(toBrief) };
     }
