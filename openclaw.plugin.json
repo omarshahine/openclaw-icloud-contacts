@@ -5,6 +5,13 @@
   "description": "Read and write Apple iCloud Contacts over CardDAV using an Apple ID and app-specific password. Server-to-server; no macOS required.",
   "skills": ["skills/icloud-contacts"],
   "activation": { "onStartup": true },
+  "configContracts": {
+    "secretInputs": {
+      "paths": [
+        { "path": "appPassword", "expected": "string" }
+      ]
+    }
+  },
   "configSchema": {
     "type": "object",
     "properties": {
@@ -15,15 +22,16 @@
           {
             "type": "object",
             "description": "SecretRef for the app-specific password",
+            "additionalProperties": false,
             "properties": {
-              "source": { "type": "string", "enum": ["env", "file"] },
-              "provider": { "type": "string" },
-              "id": { "type": "string" }
+              "source": { "type": "string", "enum": ["env", "file", "exec", "store"] },
+              "provider": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+              "id": { "type": "string", "minLength": 1 }
             },
             "required": ["source", "provider", "id"]
           }
         ],
-        "description": "App-specific password from account.apple.com: plain string, ${ENV_VAR}, or SecretRef object"
+        "description": "App-specific password from account.apple.com: host-managed env/file/exec/store SecretRef, ${ENV_VAR}, or string. OpenClaw materializes references at startup/reload."
       },
       "serverUrl": { "type": "string", "description": "CardDAV server URL (default https://contacts.icloud.com). Must be https.", "default": "https://contacts.icloud.com" },
       "readOnly": { "type": "boolean", "description": "When true, only list/search/get/groups(list,members) are available; no writes.", "default": false },

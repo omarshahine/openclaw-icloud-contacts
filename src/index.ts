@@ -12,7 +12,7 @@ import { DavClient } from "./dav/client.js";
 import { Session } from "./dav/discovery.js";
 import { resolveConfig, type RawPluginConfig, type ResolvedConfig } from "./config.js";
 import { DavError } from "./errors.js";
-import { datamarkingPreamble, markContact, markGroup } from "./sanitize.js";
+import { datamarkingPreamble, markExternalData } from "./sanitize.js";
 import { createContext, handleCreate, handleDelete, handleGet, handleGroups, handleList, handleSearch, handleUpdate, type Context } from "./tools/handlers.js";
 import { createSchema, deleteSchema, getSchema, groupsSchema, listSchema, searchSchema, updateSchema } from "./tools/schemas.js";
 
@@ -28,13 +28,13 @@ interface ToolResult {
 }
 
 function ok(payload: unknown, details: Record<string, unknown> = {}): ToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }], details };
+  return { content: [{ type: "text", text: JSON.stringify({ preamble: datamarkingPreamble(), ...markExternalData(payload) as object }, null, 2) }], details };
 }
 
 function fail(e: unknown, action: string): ToolResult {
   const code = e instanceof DavError ? e.code : "server_error";
   const message = e instanceof Error ? e.message : String(e);
-  return { content: [{ type: "text", text: JSON.stringify({ success: false, error: { code, message } }, null, 2) }], details: { action, errorCode: code } };
+  return ok({ success: false, error: { code, message } }, { action, errorCode: code });
 }
 
 const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
@@ -77,7 +77,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         try {
           const c = await getContext();
           const res = await handleList(c, params as ListParams);
-          return ok({ preamble: datamarkingPreamble(), ...res, contacts: res.contacts.map(markContact) }, { action: "list", count: res.count, truncated: res.truncated });
+          return ok(res, { action: "list", count: res.count, truncated: res.truncated });
         } catch (e) {
           return fail(e, "list");
         }
@@ -93,7 +93,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         try {
           const c = await getContext();
           const res = await handleSearch(c, params as SearchParams);
-          return ok({ preamble: datamarkingPreamble(), ...res, contacts: res.contacts.map(markContact) }, { action: "search", count: res.count, truncated: res.truncated });
+          return ok(res, { action: "search", count: res.count, truncated: res.truncated });
         } catch (e) {
           return fail(e, "search");
         }
@@ -109,7 +109,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         try {
           const c = await getContext();
           const contact = await handleGet(c, params as GetParams);
-          return ok({ preamble: datamarkingPreamble(), contact: markContact(contact) }, { action: "get", id: contact.id });
+          return ok({ contact }, { action: "get", id: contact.id });
         } catch (e) {
           return fail(e, "get");
         }
@@ -119,7 +119,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
     api.registerTool({
       name: "icloud_contacts_groups",
       label: "iCloud Contacts Groups",
-      description: "Work with iCloud contact groups: list groups, list a group's members, create a group, add/remove contacts to/from a group, delete a group. Group mutations are unavailable when the plugin is read-only.",
+      description: "Work with iCloud contact groups: list groups, list a group's members, create a group, add/remove contacts to/from a group, delete a group. Group mutations are unavailable when read-only or when a groups allowlist is configured.",
       parameters: groupsSchema,
       async execute(_id: string, params: Record<string, unknown>) {
         try {
@@ -127,9 +127,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
           const p = params as GroupsParams;
           if (readOnlyFromConfig && p.action !== "list" && p.action !== "members") throw new DavError("read_only", "This plugin is configured readOnly");
           const res = await handleGroups(c, p);
-          const r = res as Record<string, unknown>;
-          const marked = Array.isArray(r.groups) ? { ...r, groups: (r.groups as object[]).map(markGroup) } : Array.isArray(r.contacts) ? { ...r, contacts: (r.contacts as object[]).map(markContact) } : r;
-          return ok({ preamble: datamarkingPreamble(), ...marked }, { action: `groups:${p.action}` });
+          return ok(res, { action: `groups:${p.action}` });
         } catch (e) {
           return fail(e, "groups");
         }
@@ -141,13 +139,13 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
       api.registerTool({
         name: "icloud_contacts_create",
         label: "iCloud Contacts Create",
-        description: "Create an iCloud contact. Provide at least a name (givenName/familyName) or organization. Emails/phones/urls/addresses take {label, value} entries; labels like home, work, mobile, iPhone, main, other, or custom text.",
+        description: "Create an iCloud contact. Unavailable when a groups allowlist is configured. Provide at least a name (givenName/familyName) or organization. Emails/phones/urls/addresses take {label, value} entries; labels like home, work, mobile, iPhone, main, other, or custom text.",
         parameters: createSchema,
         async execute(_id: string, params: Record<string, unknown>) {
           try {
             const c = await getContext();
             const res = await handleCreate(c, params as unknown as Parameters<typeof handleCreate>[1]);
-            return ok({ success: true, contact: markContact(res.contact) }, { action: "create", id: res.contact.id });
+            return ok({ success: true, contact: res.contact }, { action: "create", id: res.contact.id });
           } catch (e) {
             return fail(e, "create");
           }
@@ -163,7 +161,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
           try {
             const c = await getContext();
             const res = await handleUpdate(c, params as unknown as Parameters<typeof handleUpdate>[1]);
-            return ok({ success: true, contact: markContact(res.contact) }, { action: "update", id: res.contact.id });
+            return ok({ success: true, contact: res.contact }, { action: "update", id: res.contact.id });
           } catch (e) {
             return fail(e, "update");
           }

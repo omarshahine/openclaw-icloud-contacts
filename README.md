@@ -33,8 +33,8 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
 1. Turn on two-factor authentication for your Apple Account if it is not already on.
 2. Create an app-specific password at <https://account.apple.com> → Sign-In and Security →
    App-Specific Passwords. Copy the `xxxx-xxxx-xxxx-xxxx` value.
-3. Make it available to the gateway as an environment variable named `ICLOUD_APP_PASSWORD` (or store it
-   in `~/.openclaw/secrets.json` and reference it with a SecretRef, see below).
+3. Make it available through an OpenClaw-managed secret provider, or through the gateway environment
+   as `ICLOUD_APP_PASSWORD`. The plugin does not read credential stores or provider files itself.
 4. Configure the plugin in `openclaw.json`:
 
    ```jsonc
@@ -45,7 +45,7 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
            "enabled": true,
            "config": {
              "appleId": "you@icloud.com",
-             "appPassword": "${ICLOUD_APP_PASSWORD}"
+             "appPassword": { "source": "env", "provider": "default", "id": "ICLOUD_APP_PASSWORD" }
            }
          }
        }
@@ -53,10 +53,29 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
    }
    ```
 
-   `appPassword` also accepts a SecretRef (`{"source":"env","provider":"env","id":"ICLOUD_APP_PASSWORD"}`
-   or `{"source":"file","provider":"secrets","id":"/icloud/appPassword"}` into `~/.openclaw/secrets.json`).
-   Without config, `ICLOUD_APPLE_ID` and `ICLOUD_APP_PASSWORD` environment variables are used.
+   `appPassword` is a native SecretInput. OpenClaw validates and materializes `env`, `file`, `exec`
+   and `store` references before injecting the plugin's runtime config. For example,
+   `{"source":"store","provider":"default","id":"ICLOUD_APP_PASSWORD"}` uses the host's default
+   protected store; custom aliases and file/exec providers must be configured in OpenClaw.
+   `${ICLOUD_APP_PASSWORD}` is also a host-managed input. Source config retains references;
+   the plugin uses the materialized password only in memory and request authentication, never
+   in tool results or configuration logs. An explicit unresolved/invalid reference or empty value
+   fails closed; it never falls back to another credential.
+
+   When the corresponding config field is omitted, `ICLOUD_APPLE_ID` or `ICLOUD_APP_PASSWORD`
+   from the gateway environment remains a legacy fallback.
    The same app-specific password works for the calendar plugin.
+
+   Native secret preparation is verified on OpenClaw **2026.11.1**. The existing advertised minimum
+   is unchanged; support for this manifest contract on older hosts has not been established.
+   References require host support for `configContracts.secretInputs`; the plugin will not bypass
+   missing support by reading provider files or a protected store itself.
+
+5. Apply configuration or credential changes through OpenClaw's supported reload/restart lifecycle
+   and confirm the new runtime handles the next call. The plugin caches its context or initial
+   configuration error for that registration; it does not implement live credential rotation.
+   Scheduling a reload is not proof that a reload completed. An `appleId is not configured` error
+   means no usable email reached that registration; it does not establish a password-provider failure.
 
 ## Configuration
 
@@ -66,7 +85,7 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
 | `appPassword` | string / `${ENV}` / SecretRef | | App-specific password. Required. Never your Apple Account password. |
 | `serverUrl` | string | `https://contacts.icloud.com` | Must be `https`. |
 | `readOnly` | boolean | `false` | No writes; create/update/delete not registered. |
-| `groups` | string[] | all | Allowlist: only members of these groups are visible or editable. |
+| `groups` | string[] | all | Tool visibility/edit allowlist. Scoped mode disables contact creation and all group mutations. |
 | `defaultLimit` | integer | 25 | Default page size for list/search. |
 | `maxContacts` | integer | 10000 | Refuse to sync larger address books. |
 
@@ -80,20 +99,41 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
   with labeled entries for get/create/update. `id` is the vCard UID (stable across devices).
 - **Apple vCard dialect.** vCard 3.0 only. Labels use Apple's `itemN.X-ABLabel` grouping and
   `_$!<Home>!$_` sentinels; standard labels map to TYPE params, custom labels round-trip as text.
-  Unknown properties are preserved on update.
+  Untouched property spelling, parameters and folding are preserved on update; notes-only edits
+  retain custom display names. TEXT line breaks are escaped; unsafe parameter controls/quotes are rejected.
 - **Photos** are external URIs on iCloud; `photoUrl` is always returned, `includePhoto=true` fetches
-  it (authenticated) and returns base64. Photos larger than 5 MB are not returned.
+  it (authenticated) and returns base64. External and inline photos are limited to 5 MiB.
+  DAV responses are capped at 32 MiB (including XML/error bodies); external photos are streamed
+  with a byte cap. Each request's 30-second deadline includes headers, body, redirects and read retries.
+  Oversized, stalled and unsafe photo responses fail explicitly.
 - **Credential hygiene.** The Apple ID and app password are sent only to hosts within the configured
   server's domain (`*.icloud.com` by default). Redirects to other hosts are refused, and photo URLs on
   other hosts are not fetched, so a shared card cannot steer your credentials elsewhere.
 - **Groups** are Apple `X-ADDRESSBOOKSERVER-KIND:group` cards; membership is by contact UID.
-- **Concurrency.** Writes send `If-Match`; one re-read + retry on 412, then `conflict`.
+  With a configured allowlist, group lists, contact group names and counts expose only allowed groups;
+  contact creation and group changes fail closed. Existing visible contacts remain editable/deletable.
+  This is a tool boundary, not a server-side ACL: the in-memory sync still contains the full address book.
+  Duplicate allowed display names fail closed instead of combining groups. Scoped update/delete
+  refresh membership before writing, waiting out older in-flight syncs. Read tools may use the
+  10-second cache. Automatic refresh preserves the previously cached contact version as a
+  precondition: changed contact content/ETag yields `conflict`, never a silent rebase.
+  CardDAV cannot atomically check a group card and write a separate contact card:
+  removal after the fresh membership check can still race the conditional contact write.
+- **Concurrency.** Updates/deletes require a strong ETag and send `If-Match`; missing/weak ETags
+  and concurrent modifications return `conflict` without an automatic write retry.
+  Re-read and review the new state before explicitly deciding on another write.
+  Creates retain `If-None-Match: *`. Writes are never replayed on network errors, 5xx or redirects.
+  `outcome_unknown` means the write may have happened (or was accepted but readback failed);
+  reconcile server state before any further write, especially before creating another contact.
 - **Rate limits.** iCloud throttles roughly 15-20 writes/minute (503). The plugin has no bulk write
   tool on purpose; batch mutations should be paced.
-- **Untrusted content.** Names, organizations, titles, nicknames and notes are wrapped in per-session
-  `[UNTRUSTED_CONTACT_DATA_...]` markers and instruction-like text is flagged.
+- **Untrusted content.** Nested contact/group/deletion/error strings are wrapped in per-session
+  `[UNTRUSTED_CONTACT_DATA_...]` markers and instruction-like text is flagged. Opaque ids, ETags,
+  binary data and fixed enums stay usable verbatim but remain untrusted data under the response preamble.
+  These markers describe provenance, not authorization or a guarantee against prompt injection.
+  Raw HTTP error bodies are not echoed.
 - **Errors.** `error.code`: `auth_failed`, `not_found`, `conflict`, `read_only`, `invalid_input`,
-  `not_configured`, `server_error`.
+  `not_configured`, `server_error`, `outcome_unknown`.
 
 ## Privacy
 

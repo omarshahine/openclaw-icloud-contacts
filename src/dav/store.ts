@@ -71,7 +71,10 @@ export class ContactStore {
 
   async refresh(force = false): Promise<void> {
     if (!force && this.syncToken && Date.now() - this.lastRefreshAt < this.opts.minRefreshIntervalMs) return;
-    if (this.inflight) return this.inflight;
+    while (this.inflight) {
+      await this.inflight;
+      if (!force) return;
+    }
     this.inflight = (async () => {
       try {
         this.book = await this.session.getPrimary();

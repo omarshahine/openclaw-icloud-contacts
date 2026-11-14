@@ -5,6 +5,7 @@ export type ErrorCode =
   | "read_only"
   | "invalid_input"
   | "server_error"
+  | "outcome_unknown"
   | "not_configured";
 
 export class DavError extends Error {

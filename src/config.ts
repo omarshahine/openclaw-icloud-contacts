@@ -1,14 +1,11 @@
 /**
- * Plugin configuration and secret resolution.
+ * Plugin configuration after OpenClaw's host-owned secret materialization.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { DavError } from "./errors.js";
 
 export interface SecretRef {
-  source: "env" | "file";
+  source: "env" | "file" | "exec" | "store";
   provider: string;
   id: string;
 }
@@ -36,67 +33,26 @@ export interface ResolvedConfig {
 
 export const DEFAULT_SERVER_URL = "https://contacts.icloud.com";
 
-export function isSecretRef(value: unknown): value is SecretRef {
-  return typeof value === "object" && value !== null && "source" in value && "provider" in value && "id" in value;
-}
-
-/** RFC 6901 JSON pointer lookup. */
-export function jsonPointer(doc: unknown, pointer: string): unknown {
-  if (!pointer) return doc;
-  const parts = pointer
-    .replace(/^\//, "")
-    .split("/")
-    .map((p) => p.replace(/~1/g, "/").replace(/~0/g, "~"));
-  let cur: unknown = doc;
-  for (const p of parts) {
-    if (cur == null || typeof cur !== "object") return undefined;
-    cur = (cur as Record<string, unknown>)[p];
-  }
-  return cur;
-}
-
-export function resolveSecretRef(ref: SecretRef, secretsPath = join(homedir(), ".openclaw", "secrets.json")): string | undefined {
-  switch (ref.source) {
-    case "env":
-      return process.env[ref.id] || undefined;
-    case "file": {
-      if (ref.provider !== "secrets") return undefined;
-      if (!existsSync(secretsPath)) return undefined;
-      try {
-        const doc = JSON.parse(readFileSync(secretsPath, "utf8"));
-        const v = jsonPointer(doc, ref.id);
-        return typeof v === "string" && v ? v : undefined;
-      } catch {
-        return undefined;
-      }
-    }
-    default:
-      return undefined;
-  }
-}
-
 /** Expand a single "${VAR}" reference; plain strings pass through. */
-function expandEnv(value: string): string {
+function expandEnv(value: string, env: NodeJS.ProcessEnv): string {
   const m = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/.exec(value.trim());
-  return m ? process.env[m[1]] ?? "" : value;
+  return m ? env[m[1]] ?? "" : value;
 }
 
-function resolveSecretValue(value: string | SecretRef | undefined, envFallback: string): string | undefined {
-  if (isSecretRef(value)) {
-    const r = resolveSecretRef(value);
-    if (r) return r;
-  } else if (typeof value === "string" && value.trim()) {
-    const v = expandEnv(value);
-    if (v) return v;
+function readAppPassword(value: unknown, env: NodeJS.ProcessEnv): string {
+  const candidate = value === undefined ? env.ICLOUD_APP_PASSWORD : value;
+  // Explicit refs are authoritative. Only the host may resolve providers,
+  // validate store/file permissions, or apply provider allowlists.
+  if (typeof candidate !== "string" || !candidate.trim() || /^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)$/.test(candidate.trim())) {
+    throw new DavError("not_configured", "appPassword is unavailable or unresolved; OpenClaw must materialize the configured SecretInput before this plugin runs");
   }
-  return process.env[envFallback] || undefined;
+  return candidate;
 }
 
 export function resolveConfig(raw: RawPluginConfig | undefined, env: NodeJS.ProcessEnv = process.env): ResolvedConfig {
-  const appleId = (typeof raw?.appleId === "string" && expandEnv(raw.appleId)) || env.ICLOUD_APPLE_ID || "";
-  const appPassword = resolveSecretValue(raw?.appPassword, "ICLOUD_APP_PASSWORD") ?? "";
+  const appleId = (typeof raw?.appleId === "string" && expandEnv(raw.appleId, env)) || env.ICLOUD_APPLE_ID || "";
   if (!appleId) throw new DavError("not_configured", "appleId is not configured (set plugin config appleId or ICLOUD_APPLE_ID)");
-  if (!appPassword) throw new DavError("not_configured", "appPassword is not configured (set plugin config appPassword, a SecretRef, or ICLOUD_APP_PASSWORD)");
+  const appPassword = readAppPassword(raw?.appPassword, env);
 
   const serverUrl = raw?.serverUrl?.trim() || DEFAULT_SERVER_URL;
   try {
