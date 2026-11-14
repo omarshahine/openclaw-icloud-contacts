@@ -40,10 +40,20 @@ async function ensure(ctx: Context, force = false): Promise<void> {
 
 function resolveGroup(ctx: Context, nameOrId: string): GroupCard {
   const needle = nameOrId.trim().toLowerCase();
-  const groups = ctx.store.groups();
+  const groups = visibleGroups(ctx);
   const g = groups.find((x) => x.id.toLowerCase() === needle) ?? groups.find((x) => x.name.toLowerCase() === needle);
   if (!g) throw notFound(`Group "${nameOrId}" not found. Available: ${groups.map((x) => x.name).join(", ") || "none"}`);
   return g;
+}
+
+function visibleGroups(ctx: Context): GroupCard[] {
+  const allow = ctx.config.groups.map((name) => name.toLowerCase());
+  return ctx.store.groups().filter((group) => !allow.length || allow.includes(group.name.toLowerCase()));
+}
+
+function contactGroups(ctx: Context, id: string, index = ctx.store.groupIndex()): string[] {
+  const allow = ctx.config.groups.map((name) => name.toLowerCase());
+  return (index.get(id) ?? []).filter((name) => !allow.length || allow.includes(name.toLowerCase()));
 }
 
 /** Contacts visible under the config allowlist and optional group filter, decorated with group names. */
@@ -59,7 +69,7 @@ function visibleContacts(ctx: Context, groupFilter?: string | null): Contact[] {
   }
   return entries.map((e) => {
     const c = e.contact!;
-    const groups = idx.get(c.id);
+    const groups = contactGroups(ctx, c.id, idx);
     return groups?.length ? { ...c, groups } : c;
   });
 }
@@ -70,7 +80,7 @@ function shape(c: Contact, fields: "brief" | "full" | null | undefined): Contact
 
 function summary(ctx: Context) {
   const book = ctx.store.addressbook;
-  return { addressbook: book?.name ?? "card", totalContacts: ctx.store.contacts().length, groups: ctx.store.groups().length, ...(ctx.store.parseErrorCount() ? { unparseableCards: ctx.store.parseErrorCount() } : {}) };
+  return { addressbook: book?.name ?? "card", totalContacts: visibleContacts(ctx).length, groups: visibleGroups(ctx).length, ...(!ctx.config.groups.length && ctx.store.parseErrorCount() ? { unparseableCards: ctx.store.parseErrorCount() } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +143,7 @@ async function locate(ctx: Context, id: string): Promise<Entry> {
 export async function handleGet(ctx: Context, params: { id: string; includePhoto?: boolean | null }): Promise<Contact> {
   const e = await locate(ctx, params.id);
   let c: Contact = { ...e.contact! };
-  const groups = ctx.store.groupIndex().get(c.id);
+  const groups = contactGroups(ctx, c.id);
   if (groups?.length) c.groups = groups;
   if (params.includePhoto) {
     if (c.photoUrl) {
@@ -156,6 +166,32 @@ function assertWritable(ctx: Context): void {
   if (book?.readOnly) throw new DavError("read_only", `Address book "${book.name}" is read-only`);
 }
 
+function assertUnscopedMutation(ctx: Context): void {
+  assertWritable(ctx);
+  if (ctx.config.groups.length) throw new DavError("read_only", "Contact creation and group mutations are disabled while a groups allowlist is configured");
+}
+
+async function write<T>(ctx: Context, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    ctx.store.reset();
+    throw error;
+  }
+}
+
+async function readAfterWrite(ctx: Context, href: string): Promise<Entry> {
+  try {
+    const stored = await ctx.session.client.get(href);
+    const entry = ctx.store.upsertLocal(href, stored.etag, stored.text);
+    if (!entry.contact && !entry.group) throw new DavError("server_error", "Written card could not be parsed");
+    return entry;
+  } catch {
+    ctx.store.reset();
+    throw new DavError("outcome_unknown", "Write was accepted but readback failed; reconcile server state before any further write. Do not replay automatically.");
+  }
+}
+
 function normaliseInput(raw: ContactInput & Record<string, unknown>): ContactInput {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(raw)) {
@@ -169,16 +205,18 @@ function normaliseInput(raw: ContactInput & Record<string, unknown>): ContactInp
 
 export async function handleCreate(ctx: Context, raw: ContactInput): Promise<{ contact: Contact }> {
   await ensure(ctx);
-  assertWritable(ctx);
+  assertUnscopedMutation(ctx);
   const input = normaliseInput(raw as ContactInput & Record<string, unknown>);
   const uid = randomUUID().toUpperCase();
   const vcard = buildNewContact(input, uid);
   const book = ctx.store.addressbook!;
   const href = `${book.href}${uid}.vcf`;
-  await ctx.session.client.put(href, vcard, { ifNoneMatch: "*" });
-  const stored = await ctx.session.client.get(href);
-  const entry = ctx.store.upsertLocal(href, stored.etag, stored.text);
-  if (!entry.contact) throw new DavError("server_error", `Created card could not be parsed back: ${entry.parseError}`);
+  await write(ctx, () => ctx.session.client.put(href, vcard, { ifNoneMatch: "*" }));
+  const entry = await readAfterWrite(ctx, href);
+  if (!entry.contact) {
+    ctx.store.reset();
+    throw new DavError("outcome_unknown", "Created card was not a contact; reconcile before retrying");
+  }
   return { contact: entry.contact };
 }
 
@@ -186,40 +224,23 @@ export async function handleUpdate(ctx: Context, raw: { id: string } & ContactIn
   const { id, ...rest } = raw;
   const input = normaliseInput(rest as ContactInput & Record<string, unknown>);
   if (Object.keys(input).length === 0) throw invalidInput("Nothing to update: provide at least one field");
-  let e = await locate(ctx, id);
+  const e = await locate(ctx, id);
   assertWritable(ctx);
-  const attempt = async (entry: Entry) => {
-    const vcard = patchContact(entry.text, entry.contact!, input);
-    await ctx.session.client.put(entry.href, vcard, entry.etag ? { ifMatch: entry.etag } : {});
-  };
-  try {
-    await attempt(e);
-  } catch (err) {
-    if (err instanceof DavError && err.code === "conflict") {
-      const fresh = await ctx.session.client.get(e.href);
-      e = ctx.store.upsertLocal(e.href, fresh.etag, fresh.text);
-      if (!e.contact) throw notFound(`Contact "${id}" changed on the server and can no longer be parsed`);
-      await attempt(e);
-    } else throw err;
+  const vcard = patchContact(e.text, e.contact!, input);
+  await write(ctx, () => ctx.session.client.put(e.href, vcard, { ifMatch: e.etag }));
+  const entry = await readAfterWrite(ctx, e.href);
+  if (!entry.contact) {
+    ctx.store.reset();
+    throw new DavError("outcome_unknown", "Updated card was not a contact; reconcile before retrying");
   }
-  const stored = await ctx.session.client.get(e.href);
-  const entry = ctx.store.upsertLocal(e.href, stored.etag, stored.text);
-  if (!entry.contact) throw new DavError("server_error", `Updated card could not be parsed back: ${entry.parseError}`);
-  const groups = ctx.store.groupIndex().get(entry.contact.id);
+  const groups = contactGroups(ctx, entry.contact.id);
   return { contact: groups?.length ? { ...entry.contact, groups } : entry.contact };
 }
 
 export async function handleDelete(ctx: Context, params: { id: string }): Promise<{ deleted: true; id: string; fullName: string }> {
   const e = await locate(ctx, params.id);
   assertWritable(ctx);
-  try {
-    await ctx.session.client.delete(e.href, e.etag ? { ifMatch: e.etag } : {});
-  } catch (err) {
-    if (err instanceof DavError && err.code === "conflict") {
-      const fresh = await ctx.session.client.get(e.href);
-      await ctx.session.client.delete(e.href, fresh.etag ? { ifMatch: fresh.etag } : {});
-    } else throw err;
-  }
+  await write(ctx, () => ctx.session.client.delete(e.href, { ifMatch: e.etag }));
   const fullName = e.contact!.fullName;
   ctx.store.removeLocal(e.href);
   // Also drop membership from cached groups so results are consistent before next sync.
@@ -241,9 +262,10 @@ export interface GroupsParams {
 export async function handleGroups(ctx: Context, raw: GroupsParams) {
   const p = stripNulls(raw);
   await ensure(ctx);
+  if (p.action !== "list" && p.action !== "members") assertUnscopedMutation(ctx);
   switch (p.action) {
     case "list": {
-      const groups = ctx.store.groups().sort((a, b) => a.name.localeCompare(b.name));
+      const groups = visibleGroups(ctx).sort((a, b) => a.name.localeCompare(b.name));
       return { count: groups.length, groups: groups.map((g) => ({ id: g.id, name: g.name, memberCount: g.memberIds.length })) };
     }
     case "members": {
@@ -260,10 +282,10 @@ export async function handleGroups(ctx: Context, raw: GroupsParams) {
       const book = ctx.store.addressbook!;
       const href = `${book.href}${uid}.vcf`;
       const ids = await validContactIds(ctx, p.contactIds ?? []);
-      await ctx.session.client.put(href, buildGroupCard(p.name.trim(), uid, ids), { ifNoneMatch: "*" });
-      const stored = await ctx.session.client.get(href);
-      const entry = ctx.store.upsertLocal(href, stored.etag, stored.text);
-      return { created: true, group: entry.group ? { id: entry.group.id, name: entry.group.name, memberCount: entry.group.memberIds.length } : { id: uid, name: p.name } };
+      await write(ctx, () => ctx.session.client.put(href, buildGroupCard(p.name!.trim(), uid, ids), { ifNoneMatch: "*" }));
+      const entry = await readAfterWrite(ctx, href);
+      if (!entry.group) throw new DavError("outcome_unknown", "Created card was not a group; reconcile before retrying");
+      return { created: true, group: { id: entry.group.id, name: entry.group.name, memberCount: entry.group.memberIds.length } };
     }
     case "add":
     case "remove": {
@@ -276,27 +298,17 @@ export async function handleGroups(ctx: Context, raw: GroupsParams) {
       const current = new Set(g.memberIds);
       for (const id of ids) p.action === "add" ? current.add(id) : current.delete(id);
       const vcard = setGroupMembers(entry.text, [...current]);
-      try {
-        await ctx.session.client.put(entry.href, vcard, entry.etag ? { ifMatch: entry.etag } : {});
-      } catch (err) {
-        if (err instanceof DavError && err.code === "conflict") {
-          const fresh = await ctx.session.client.get(entry.href);
-          const fe = ctx.store.upsertLocal(entry.href, fresh.etag, fresh.text);
-          const cur2 = new Set(fe.group?.memberIds ?? []);
-          for (const id of ids) p.action === "add" ? cur2.add(id) : cur2.delete(id);
-          await ctx.session.client.put(entry.href, setGroupMembers(fe.text, [...cur2]), fe.etag ? { ifMatch: fe.etag } : {});
-        } else throw err;
-      }
-      const stored = await ctx.session.client.get(entry.href);
-      const updated = ctx.store.upsertLocal(entry.href, stored.etag, stored.text);
-      return { updated: true, group: { id: g.id, name: g.name, memberCount: updated.group?.memberIds.length ?? current.size } };
+      await write(ctx, () => ctx.session.client.put(entry.href, vcard, { ifMatch: entry.etag }));
+      const updated = await readAfterWrite(ctx, entry.href);
+      if (!updated.group) throw new DavError("outcome_unknown", "Written card was not a group; reconcile before retrying");
+      return { updated: true, group: { id: g.id, name: g.name, memberCount: updated.group.memberIds.length } };
     }
     case "delete": {
       assertWritable(ctx);
       if (!p.group) throw invalidInput("group is required for delete");
       const g = resolveGroup(ctx, p.group);
       const entry = ctx.store.groupEntries().find((e) => e.group!.id === g.id)!;
-      await ctx.session.client.delete(entry.href, entry.etag ? { ifMatch: entry.etag } : {});
+      await write(ctx, () => ctx.session.client.delete(entry.href, { ifMatch: entry.etag }));
       ctx.store.removeLocal(entry.href);
       return { deleted: true, group: { id: g.id, name: g.name } };
     }

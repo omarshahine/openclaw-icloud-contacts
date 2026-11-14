@@ -438,6 +438,7 @@ export function cardToContact(card: VCard, opts: { etag?: string; readOnly: bool
     if (isUri) c.photoUrl = val;
     else if (opts.includePhoto) {
       c.imageBase64 = val.replace(/\s+/g, "");
+      if (Buffer.byteLength(c.imageBase64, "base64") > 5 * 1024 * 1024) throw invalidInput("Inline photo exceeds the 5 MiB limit");
       const t = photo.params.TYPE?.[0];
       if (t) c.imageType = t.toLowerCase();
     }
@@ -482,16 +483,23 @@ function applyName(card: VCard, input: ContactInput, existing?: Contact): void {
   const suffix = pick("nameSuffix");
   const org = pick("organization");
   const dept = pick("department");
-  setSingle(card, "N", joinCompound([family, given, middle, prefix, suffix]));
+  const nameChanged = !existing || ["familyName", "givenName", "middleName", "namePrefix", "nameSuffix"].some((key) => input[key as keyof ContactInput] !== undefined);
+  if (nameChanged) setSingle(card, "N", joinCompound([family, given, middle, prefix, suffix]));
   const fnParts = [prefix, given, middle, family, suffix].filter(Boolean).join(" ").trim();
   const contactType = input.contactType === undefined ? cur.contactType : input.contactType;
   const fn = fnParts || org || cur.fullName || "";
-  if (!fn) throw invalidInput("A name (givenName/familyName) or organization is required");
-  setSingle(card, "FN", escapeText(fn));
-  if (org || dept) setSingle(card, "ORG", joinCompound([org, dept]));
-  else if (input.organization === null || input.department === null || (input.organization !== undefined && !org)) removeAll(card, "ORG");
-  if (contactType === "organization") setSingle(card, "X-ABSHOWAS", "COMPANY");
-  else if (input.contactType === "person" || input.contactType === null) removeAll(card, "X-ABSHOWAS");
+  if (!existing || nameChanged || input.organization !== undefined || input.contactType !== undefined) {
+    if (!fn) throw invalidInput("A name (givenName/familyName) or organization is required");
+    setSingle(card, "FN", escapeText(fn));
+  }
+  if (!existing || input.organization !== undefined || input.department !== undefined) {
+    if (org || dept) setSingle(card, "ORG", joinCompound([org, dept]));
+    else removeAll(card, "ORG");
+  }
+  if (!existing || input.contactType !== undefined) {
+    if (contactType === "organization") setSingle(card, "X-ABSHOWAS", "COMPANY");
+    else removeAll(card, "X-ABSHOWAS");
+  }
 }
 
 function applyScalar(card: VCard, name: string, value: string | null | undefined): void {
@@ -526,7 +534,7 @@ function applyAddresses(card: VCard, list: AddressInput[] | null | undefined): v
         const g = nextGroup(card);
         adr.group = g;
       }
-      card.props.push({ group: adr.group, name: "X-ABADR", params: {}, value: a.countryCode.toLowerCase() });
+      card.props.push({ group: adr.group, name: "X-ABADR", params: {}, value: escapeText(a.countryCode.toLowerCase()) });
     }
   });
 }
@@ -544,7 +552,9 @@ function applyGroupedX(card: VCard, name: string, items: { label?: string; value
 
 /** Apply a ContactInput onto a card (create: empty card; update: parsed existing). */
 export function applyInput(card: VCard, input: ContactInput, existing?: Contact): void {
-  applyName(card, input, existing);
+  if (!existing || ["givenName", "familyName", "middleName", "namePrefix", "nameSuffix", "organization", "department", "contactType"].some((key) => input[key as keyof ContactInput] !== undefined)) {
+    applyName(card, input, existing);
+  }
   applyScalar(card, "NICKNAME", input.nickname);
   applyScalar(card, "TITLE", input.jobTitle);
   applyScalar(card, "NOTE", input.notes);

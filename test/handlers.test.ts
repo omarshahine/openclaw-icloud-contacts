@@ -99,7 +99,7 @@ describe("handlers against fake iCloud CardDAV", () => {
     await expect(handleGet(ctx, { id: created.contact.id })).rejects.toMatchObject({ code: "not_found" });
   });
 
-  it("recovers from a concurrent modification (412) once", async () => {
+  it("reports a concurrent modification without replaying the write", async () => {
     await handleList(ctx, {});
     const url = `${fake.cardUrl}A.vcf`;
     let mutated = false;
@@ -119,9 +119,8 @@ describe("handlers against fake iCloud CardDAV", () => {
     });
     const c2 = createContext(new Session(client), ctx.config);
     c2.store.opts.minRefreshIntervalMs = 0;
-    const res = await handleUpdate(c2, { id: "UID-A", nickname: "Ali" });
-    expect(res.contact.nickname).toBe("Ali");
-    expect(fake.log.filter((l) => l.method === "PUT").length).toBe(2);
+    await expect(handleUpdate(c2, { id: "UID-A", nickname: "Ali" })).rejects.toMatchObject({ code: "conflict" });
+    expect(fake.log.filter((l) => l.method === "PUT").length).toBe(1);
   });
 
   it("manages groups: create, add, remove, members, delete", async () => {

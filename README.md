@@ -66,7 +66,7 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
 | `appPassword` | string / `${ENV}` / SecretRef | | App-specific password. Required. Never your Apple Account password. |
 | `serverUrl` | string | `https://contacts.icloud.com` | Must be `https`. |
 | `readOnly` | boolean | `false` | No writes; create/update/delete not registered. |
-| `groups` | string[] | all | Allowlist: only members of these groups are visible or editable. |
+| `groups` | string[] | all | Tool visibility/edit allowlist. Scoped mode disables contact creation and all group mutations. |
 | `defaultLimit` | integer | 25 | Default page size for list/search. |
 | `maxContacts` | integer | 10000 | Refuse to sync larger address books. |
 
@@ -80,20 +80,35 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
   with labeled entries for get/create/update. `id` is the vCard UID (stable across devices).
 - **Apple vCard dialect.** vCard 3.0 only. Labels use Apple's `itemN.X-ABLabel` grouping and
   `_$!<Home>!$_` sentinels; standard labels map to TYPE params, custom labels round-trip as text.
-  Unknown properties are preserved on update.
+  Untouched property spelling, parameters and folding are preserved on update; notes-only edits
+  retain custom display names. TEXT line breaks are escaped; unsafe parameter controls/quotes are rejected.
 - **Photos** are external URIs on iCloud; `photoUrl` is always returned, `includePhoto=true` fetches
-  it (authenticated) and returns base64. Photos larger than 5 MB are not returned.
+  it (authenticated) and returns base64. External and inline photos are limited to 5 MiB.
+  DAV responses are capped at 32 MiB (including XML/error bodies); external photos are streamed
+  with a byte cap. Each request's 30-second deadline includes headers, body, redirects and read retries.
+  Oversized, stalled and unsafe photo responses fail explicitly.
 - **Credential hygiene.** The Apple ID and app password are sent only to hosts within the configured
   server's domain (`*.icloud.com` by default). Redirects to other hosts are refused, and photo URLs on
   other hosts are not fetched, so a shared card cannot steer your credentials elsewhere.
 - **Groups** are Apple `X-ADDRESSBOOKSERVER-KIND:group` cards; membership is by contact UID.
-- **Concurrency.** Writes send `If-Match`; one re-read + retry on 412, then `conflict`.
+  With a configured allowlist, group lists, contact group names and counts expose only allowed groups;
+  contact creation and group changes fail closed. Existing visible contacts remain editable/deletable.
+  This is a tool boundary, not a server-side ACL: the in-memory sync still contains the full address book.
+- **Concurrency.** Updates/deletes require a strong ETag and send `If-Match`; missing/weak ETags
+  and concurrent modifications return `conflict` without an automatic write retry.
+  Re-read and review the new state before explicitly deciding on another write.
+  Creates retain `If-None-Match: *`. Writes are never replayed on network errors, 5xx or redirects.
+  `outcome_unknown` means the write may have happened (or was accepted but readback failed);
+  reconcile server state before any further write, especially before creating another contact.
 - **Rate limits.** iCloud throttles roughly 15-20 writes/minute (503). The plugin has no bulk write
   tool on purpose; batch mutations should be paced.
-- **Untrusted content.** Names, organizations, titles, nicknames and notes are wrapped in per-session
-  `[UNTRUSTED_CONTACT_DATA_...]` markers and instruction-like text is flagged.
+- **Untrusted content.** Nested contact/group/deletion/error strings are wrapped in per-session
+  `[UNTRUSTED_CONTACT_DATA_...]` markers and instruction-like text is flagged. Opaque ids, ETags,
+  binary data and fixed enums stay usable verbatim but remain untrusted data under the response preamble.
+  These markers describe provenance, not authorization or a guarantee against prompt injection.
+  Raw HTTP error bodies are not echoed.
 - **Errors.** `error.code`: `auth_failed`, `not_found`, `conflict`, `read_only`, `invalid_input`,
-  `not_configured`, `server_error`.
+  `not_configured`, `server_error`, `outcome_unknown`.
 
 ## Privacy
 

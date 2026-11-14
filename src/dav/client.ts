@@ -5,7 +5,7 @@
  * - Manual redirect following so the Authorization header survives the
  *   caldav.icloud.com -> pNN-caldav.icloud.com hop (fetch strips auth on
  *   cross-origin redirects when following automatically)
- * - One retry on 5xx / network failure
+ * - One retry on 5xx / network failure for read/discovery requests only
  * - Maps HTTP status to typed DavError codes; never echoes credentials
  */
 
@@ -21,6 +21,8 @@ export interface ClientOptions {
   fetch?: FetchLike;
   /** Milliseconds; default 30s */
   timeoutMs?: number;
+  /** Maximum decoded DAV response bytes; default 32 MiB. */
+  maxResponseBytes?: number;
   userAgent?: string;
 }
 
@@ -54,6 +56,7 @@ export class DavClient {
   private readonly fetchImpl: FetchLike;
   private readonly timeoutMs: number;
   private readonly userAgent: string;
+  private readonly maxResponseBytes: number;
 
   constructor(opts: ClientOptions) {
     const url = new URL(opts.serverUrl);
@@ -65,6 +68,8 @@ export class DavClient {
     this.authHeader = "Basic " + Buffer.from(`${opts.username}:${opts.password}`, "utf8").toString("base64");
     this.fetchImpl = opts.fetch ?? ((input, init) => fetch(input, init));
     this.timeoutMs = opts.timeoutMs ?? 30_000;
+    this.maxResponseBytes = opts.maxResponseBytes ?? 32 * 1024 * 1024;
+    if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0 || !Number.isSafeInteger(this.maxResponseBytes) || this.maxResponseBytes <= 0) throw new DavError("invalid_input", "Response limit and timeout must be positive");
     this.userAgent = opts.userAgent ?? "openclaw-icloud-contacts/0.1";
   }
 
@@ -93,70 +98,86 @@ export class DavClient {
     let current = url;
     let attempt = 0;
     let redirects = 0;
+    const readOnly = ["GET", "PROPFIND", "REPORT", "HEAD", "OPTIONS"].includes(method);
     if (!this.isTrustedUrl(current)) {
       throw new DavError("server_error", `Refusing to send credentials to untrusted host ${safeHost(current)} (trusted: *.${this.trustedDomain})`);
     }
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const headers: Record<string, string> = {
-        Authorization: this.authHeader,
-        "User-Agent": this.userAgent,
-        Accept: "*/*",
-        ...(opts.depth !== undefined ? { Depth: opts.depth } : {}),
-        ...(opts.body !== undefined ? { "Content-Type": "application/xml; charset=utf-8" } : {}),
-        ...(opts.headers ?? {}),
-      };
-      let res: Response;
-      try {
-        const ac = new AbortController();
-        const timer = setTimeout(() => ac.abort(), this.timeoutMs);
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), this.timeoutMs);
+    const deadline = <T>(operation: Promise<T>): Promise<T> => withAbort(operation, ac.signal);
+    try {
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const headers: Record<string, string> = {
+          Authorization: this.authHeader,
+          "User-Agent": this.userAgent,
+          Accept: "*/*",
+          ...(opts.depth !== undefined ? { Depth: opts.depth } : {}),
+          ...(opts.body !== undefined ? { "Content-Type": "application/xml; charset=utf-8" } : {}),
+          ...(opts.headers ?? {}),
+        };
+        let res: Response;
         try {
-          res = await this.fetchImpl(current, {
+          res = await deadline(this.fetchImpl(current, {
             method,
             headers,
             body: opts.body,
             redirect: "manual",
             signal: ac.signal,
-          });
-        } finally {
-          clearTimeout(timer);
+          }));
+        } catch {
+          if (readOnly && attempt === 0 && !ac.signal.aborted) {
+            attempt++;
+            await deadline(sleep(500));
+            continue;
+          }
+          throw new DavError(readOnly ? "server_error" : "outcome_unknown", readOnly ? "CardDAV request failed or timed out" : "Write outcome is unknown; do not replay automatically. Reconcile server state before another write.");
         }
-      } catch (e) {
-        if (attempt === 0) {
-          attempt++;
-          await sleep(500);
+
+        if (res.status >= 300 && res.status < 400) {
+          discardBody(res);
+          if (!readOnly) throw new DavError("outcome_unknown", "Write redirect was not followed; reconcile server state before retrying");
+          const loc = res.headers.get("location");
+          if (!loc || redirects >= MAX_REDIRECTS) {
+            throw new DavError("server_error", `Too many redirects or missing Location (status ${res.status})`, res.status);
+          }
+          redirects++;
+          const next = new URL(loc, current).toString();
+          if (!this.isTrustedUrl(next)) {
+            throw new DavError("server_error", `Refusing to follow redirect to untrusted host ${safeHost(next)} (trusted: *.${this.trustedDomain})`);
+          }
+          current = next;
           continue;
         }
-        throw new DavError("server_error", `Network error talking to CardDAV server: ${describe(e)}`);
-      }
 
-      if (res.status >= 300 && res.status < 400) {
-        const loc = res.headers.get("location");
-        if (!loc || redirects >= MAX_REDIRECTS) {
-          throw new DavError("server_error", `Too many redirects or missing Location (status ${res.status})`, res.status);
+        if (res.status >= 500 && !readOnly) {
+          discardBody(res);
+          throw new DavError("outcome_unknown", "Server failed during write; reconcile server state before retrying", res.status);
         }
-        redirects++;
-        const next = new URL(loc, current).toString();
-        if (!this.isTrustedUrl(next)) {
-          throw new DavError("server_error", `Refusing to follow redirect to untrusted host ${safeHost(next)} (trusted: *.${this.trustedDomain})`);
+        if (res.status >= 500 && attempt === 0) {
+          discardBody(res);
+          attempt++;
+          await deadline(sleep(500));
+          continue;
         }
-        current = next;
-        continue;
-      }
 
-      if (res.status >= 500 && attempt === 0) {
-        attempt++;
-        await sleep(500);
-        continue;
+        let text: string;
+        try {
+          text = (await readBody(res, this.maxResponseBytes, ac.signal)).toString("utf8");
+        } catch (e) {
+          if (!readOnly) throw new DavError("outcome_unknown", "Write response could not be read; reconcile server state before retrying");
+          if (e instanceof DavError) throw e;
+          throw new DavError("server_error", "CardDAV response body could not be read");
+        }
+        this.throwForStatus(res.status, method, current);
+        return { status: res.status, headers: res.headers, text, url: current };
       }
-
-      const text = await res.text();
-      this.throwForStatus(res.status, method, current, text);
-      return { status: res.status, headers: res.headers, text, url: current };
+    } finally {
+      clearTimeout(timer);
     }
   }
 
-  private throwForStatus(status: number, method: string, url: string, body: string): void {
+  private throwForStatus(status: number, method: string, url: string): void {
     if (status < 400) return;
     const path = safePath(url);
     switch (status) {
@@ -176,7 +197,7 @@ export class DavClient {
       default:
         throw new DavError(
           "server_error",
-          `${method} ${path}: HTTP ${status}${body ? " " + body.slice(0, 200).replace(/\s+/g, " ") : ""}`,
+          `${method} ${path}: HTTP ${status}`,
           status,
         );
     }
@@ -199,6 +220,7 @@ export class DavClient {
   }
 
   async put(url: string, vcard: string, cond: { ifMatch?: string; ifNoneMatch?: "*" }): Promise<{ etag?: string }> {
+    if (cond.ifNoneMatch !== "*") requireEtag(cond.ifMatch);
     const headers: Record<string, string> = { "Content-Type": "text/vcard; charset=utf-8" };
     if (cond.ifMatch) headers["If-Match"] = cond.ifMatch;
     if (cond.ifNoneMatch) headers["If-None-Match"] = cond.ifNoneMatch;
@@ -208,31 +230,81 @@ export class DavClient {
 
   /**
    * Authenticated binary GET (photos). Credentials are sent only to trusted
-   * hosts and redirects are never followed; untrusted URLs return undefined.
+   * hosts and redirects are never followed. Unsafe/oversized responses fail explicitly.
    */
-  async getBinary(url: string, maxBytes = 5 * 1024 * 1024): Promise<{ data: Buffer; contentType?: string } | undefined> {
-    if (!this.isTrustedUrl(url)) return undefined;
-    const res = await this.fetchImpl(url, { method: "GET", headers: { Authorization: this.authHeader, "User-Agent": this.userAgent, Accept: "image/*,*/*;q=0.5" }, redirect: "manual" });
-    if (!res.ok) return undefined;
-    const ab = await res.arrayBuffer();
-    if (ab.byteLength > maxBytes) throw new DavError("invalid_input", `Binary larger than ${Math.round(maxBytes / 1024 / 1024)} MB; not returned`);
-    return { data: Buffer.from(ab), contentType: res.headers.get("content-type")?.split(";")[0] ?? undefined };
+  async getBinary(url: string, maxBytes = 5 * 1024 * 1024): Promise<{ data: Buffer; contentType?: string }> {
+    if (!this.isTrustedUrl(url)) throw new DavError("invalid_input", "Photo URL is outside the trusted CardDAV domain");
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), this.timeoutMs);
+    try {
+      const res = await withAbort(this.fetchImpl(url, { method: "GET", headers: { Authorization: this.authHeader, "User-Agent": this.userAgent, Accept: "image/*,*/*;q=0.5" }, redirect: "manual", signal: ac.signal }), ac.signal);
+      if (!res.ok) {
+        discardBody(res);
+        throw new DavError("server_error", `Photo request failed (HTTP ${res.status}); redirects are not followed`, res.status);
+      }
+      return { data: await readBody(res, maxBytes, ac.signal), contentType: res.headers.get("content-type")?.split(";")[0] ?? undefined };
+    } catch (error) {
+      if (error instanceof DavError) throw error;
+      throw new DavError("server_error", "Photo request failed or timed out");
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async delete(url: string, cond: { ifMatch?: string } = {}): Promise<void> {
+    requireEtag(cond.ifMatch);
     const headers: Record<string, string> = {};
     if (cond.ifMatch) headers["If-Match"] = cond.ifMatch;
     await this.request("DELETE", url, { headers });
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+function discardBody(res: Response): void {
+  // Cancellation is best effort; never let a stalled cleanup extend the deadline.
+  void res.body?.cancel().catch(() => {});
 }
 
-function describe(e: unknown): string {
-  if (e instanceof Error) return e.name === "AbortError" ? "timeout" : e.message;
-  return String(e);
+function requireEtag(etag?: string): void {
+  if (!etag || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag)) throw new DavError("conflict", "A strong ETag is required; reread the resource before writing");
+}
+
+function withAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(new DavError("server_error", "CardDAV deadline exceeded"));
+    if (signal.aborted) { abort(); return; }
+    signal.addEventListener("abort", abort, { once: true });
+    operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+async function readBody(res: Response, maxBytes: number, signal: AbortSignal): Promise<Buffer> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new DavError("invalid_input", "Body limit must be positive");
+  const declared = res.headers.get("content-length");
+  if (declared !== null && Number(declared) > maxBytes) {
+    discardBody(res);
+    throw new DavError("server_error", "CardDAV response exceeds byte limit");
+  }
+  if (!res.body) return Buffer.alloc(0);
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await withAbort(reader.read(), signal);
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) throw new DavError("server_error", "CardDAV response exceeds byte limit");
+      chunks.push(value);
+    }
+    return Buffer.concat(chunks, size);
+  } finally {
+    void reader.cancel().catch(() => { /* Preserve the original body/timeout error. */ });
+    reader.releaseLock();
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function safeHost(url: string): string {

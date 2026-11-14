@@ -5,6 +5,10 @@
  * prefixes so updates round-trip byte-for-byte for anything we do not model.
  */
 
+import { invalidInput } from "../errors.js";
+
+const originalProperties = new WeakMap<VProperty, { snapshot: string; raw: string }>();
+
 export interface VProperty {
   /** Apple/RFC group prefix without the dot, e.g. "item1"; undefined if none */
   group?: string;
@@ -92,11 +96,16 @@ function splitParamValues(raw: string): string[] {
 
 /** Parse a single vCard document. Returns the first VCARD. */
 export function parseVCard(text: string): VCard {
-  const lines = unfold(text);
+  const lines = text.split(/\r\n|\n|\r/).reduce<string[]>((out, line) => {
+    if (/^[ \t]/.test(line) && out.length) out[out.length - 1] += "\r\n" + line;
+    else if (line) out.push(line);
+    return out;
+  }, []);
   const props: VProperty[] = [];
   let inside = false;
   for (const line of lines) {
-    const p = parseContentLine(line);
+    const p = parseContentLine(unfold(line).join(""));
+    originalProperties.set(p, { snapshot: JSON.stringify(p), raw: line });
     if (p.name === "BEGIN" && p.value.trim().toUpperCase() === "VCARD") {
       if (inside) break; // nested VCARD not supported; stop
       inside = true;
@@ -132,12 +141,18 @@ export function fold(line: string): string {
 }
 
 function paramValueOut(v: string): string {
+  if (/[\x00-\x1f\x7f"]/.test(v)) throw invalidInput("vCard parameters cannot contain control characters or double quotes");
   return /[;:,]/.test(v) ? `"${v}"` : v;
 }
 
 export function serializeProperty(p: VProperty): string {
+  const original = originalProperties.get(p);
+  if (original?.snapshot === JSON.stringify(p)) return original.raw;
+  if (!/^[A-Z0-9-]+$/i.test(p.name) || (p.group && !/^[A-Z0-9-]+$/i.test(p.group))) throw invalidInput("Invalid vCard property name");
+  if (/[\r\n\x00]/.test(p.value)) throw invalidInput("vCard property values must escape line breaks");
   let line = (p.group ? `${p.group}.` : "") + p.name;
   for (const [k, vals] of Object.entries(p.params)) {
+    if (!/^[A-Z0-9-]+$/i.test(k)) throw invalidInput("Invalid vCard parameter name");
     // Apple writes repeated type params (type=INTERNET;type=pref); keep that shape.
     for (const v of vals) line += `;${k.toLowerCase() === "type" ? "type" : k}=${paramValueOut(v)}`;
   }
@@ -149,7 +164,7 @@ export function serializeVCard(card: VCard): string {
   const lines = ["BEGIN:VCARD"];
   // VERSION must come first per RFC 2426; ensure it exists and leads.
   const version = card.props.find((p) => p.name === "VERSION");
-  lines.push(`VERSION:${version?.value ?? "3.0"}`);
+  lines.push(version ? serializeProperty(version) : "VERSION:3.0");
   for (const p of card.props) if (p.name !== "VERSION") lines.push(serializeProperty(p));
   lines.push("END:VCARD");
   return lines.join("\r\n") + "\r\n";
@@ -164,7 +179,7 @@ export function serializeVCard(card: VCard): string {
  * Apple's `_$!<Home>!$_` sentinel characters MUST NOT be escaped (RFC 6350 §3.4).
  */
 export function escapeText(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+  return s.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r\n|\r|\n/g, "\\n");
 }
 
 export function unescapeText(s: string): string {
