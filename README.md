@@ -87,13 +87,13 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
   server's domain (`*.icloud.com` by default). Redirects to other hosts are refused, and photo URLs on
   other hosts are not fetched, so a shared card cannot steer your credentials elsewhere.
 - **Groups** are Apple `X-ADDRESSBOOKSERVER-KIND:group` cards; membership is by contact UID.
-- **Concurrency.** Writes send `If-Match`; one re-read + retry on 412, then `conflict`.
+- **Concurrency.** Contact edits and deletes require a strong version tag and do not retry on conflict. A lost or uncertain write response returns `write_unconfirmed`; check the stored record before deciding whether to try again. CardDAV read requests still tolerate one transient retry.
 - **Rate limits.** iCloud throttles roughly 15-20 writes/minute (503). The plugin has no bulk write
   tool on purpose; batch mutations should be paced.
 - **Untrusted content.** Names, organizations, titles, nicknames and notes are wrapped in per-session
   `[UNTRUSTED_CONTACT_DATA_...]` markers and instruction-like text is flagged.
 - **Errors.** `error.code`: `auth_failed`, `not_found`, `conflict`, `read_only`, `invalid_input`,
-  `not_configured`, `server_error`.
+  `not_configured`, `server_error`, `write_unconfirmed`.
 
 ## Privacy
 
