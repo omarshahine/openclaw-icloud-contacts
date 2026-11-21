@@ -202,6 +202,36 @@ describe("contact mapping", () => {
     expect(c.lastModified).not.toBe("2026-08-01T12:00:00.000Z");
   });
 
+  it("preserves custom identity and untouched properties on a notes-only edit", () => {
+    const original = APPLE_CARD.replace("FN:Dr. Jane Q. Doe PhD", "FN;X-LABEL=display:Professor J");
+    const existing = parseContact(original, { readOnly: false });
+    const updated = patchContact(original, existing, { notes: "New note" });
+    const untouched = (text: string) => parseVCard(text).props.filter(({ name }) => name !== "NOTE" && name !== "REV");
+    expect(untouched(updated)).toEqual(untouched(original));
+    expect(parseContact(updated, { readOnly: false })).toMatchObject({ fullName: "Professor J", notes: "New note" });
+  });
+
+  it("updates only the requested name-related fields", () => {
+    const original = APPLE_CARD.replace("FN:Dr. Jane Q. Doe PhD", "FN:Professor J");
+    const existing = parseContact(original, { readOnly: false });
+    const updated = patchContact(original, existing, { department: "Support", contactType: "person" });
+    const person = parseContact(updated, { readOnly: false });
+    expect(person).toMatchObject({ fullName: "Professor J", department: "Support", contactType: "person" });
+    const renamed = patchContact(original, existing, { familyName: "Roe" });
+    expect(parseContact(renamed, { readOnly: false }).fullName).toBe("Dr. Jane Q. Roe PhD");
+    expect(renamed).toContain("ORG:Acme\\, Inc.;R&D");
+  });
+
+  it("refreshes an organization-derived display name without replacing a custom name", () => {
+    const original = buildNewContact({ organization: "Old Org" }, "ORG-1");
+    const existing = parseContact(original, { readOnly: false });
+    const updated = patchContact(original, existing, { organization: "New Org" });
+    expect(parseContact(updated, { readOnly: false }).fullName).toBe("New Org");
+    const custom = original.replace("FN:Old Org", "FN:Custom Org");
+    const kept = patchContact(custom, parseContact(custom, { readOnly: false }), { organization: "New Org" });
+    expect(parseContact(kept, { readOnly: false }).fullName).toBe("Custom Org");
+  });
+
   it("handles groups", () => {
     const g = buildGroupCard("Friends", "G1", ["A", "B"]);
     expect(isGroupCard(parseVCard(g))).toBe(true);

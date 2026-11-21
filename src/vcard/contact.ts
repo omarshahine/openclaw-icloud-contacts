@@ -482,15 +482,24 @@ function applyName(card: VCard, input: ContactInput, existing?: Contact): void {
   const suffix = pick("nameSuffix");
   const org = pick("organization");
   const dept = pick("department");
-  setSingle(card, "N", joinCompound([family, given, middle, prefix, suffix]));
+  const changes = (k: "familyName" | "givenName" | "middleName" | "namePrefix" | "nameSuffix" | "organization" | "department") =>
+    input[k] !== undefined && (input[k] ?? "") !== (cur[k] ?? "");
+  const nameChanged = changes("familyName") || changes("givenName") || changes("middleName") || changes("namePrefix") || changes("nameSuffix");
+  if (!existing || nameChanged) setSingle(card, "N", joinCompound([family, given, middle, prefix, suffix]));
   const fnParts = [prefix, given, middle, family, suffix].filter(Boolean).join(" ").trim();
-  const contactType = input.contactType === undefined ? cur.contactType : input.contactType;
-  const fn = fnParts || org || cur.fullName || "";
-  if (!fn) throw invalidInput("A name (givenName/familyName) or organization is required");
-  setSingle(card, "FN", escapeText(fn));
-  if (org || dept) setSingle(card, "ORG", joinCompound([org, dept]));
-  else if (input.organization === null || input.department === null || (input.organization !== undefined && !org)) removeAll(card, "ORG");
-  if (contactType === "organization") setSingle(card, "X-ABSHOWAS", "COMPANY");
+  // Names stored in FN may intentionally differ from the structured fields.
+  const organizationNameChanged = changes("organization") && !!org && !fnParts &&
+    (!cur.fullName || cur.fullName === cur.organization);
+  if (!existing || nameChanged || organizationNameChanged) {
+    const fn = fnParts || org || cur.fullName || "";
+    if (!fn) throw invalidInput("A name (givenName/familyName) or organization is required");
+    setSingle(card, "FN", escapeText(fn));
+  }
+  if (!existing || changes("organization") || changes("department")) {
+    if (org || dept) setSingle(card, "ORG", joinCompound([org, dept]));
+    else removeAll(card, "ORG");
+  }
+  if (input.contactType === "organization" && cur.contactType !== "organization") setSingle(card, "X-ABSHOWAS", "COMPANY");
   else if (input.contactType === "person" || input.contactType === null) removeAll(card, "X-ABSHOWAS");
 }
 
