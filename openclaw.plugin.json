@@ -27,7 +27,7 @@
       },
       "serverUrl": { "type": "string", "description": "CardDAV server URL (default https://contacts.icloud.com). Must be https.", "default": "https://contacts.icloud.com" },
       "readOnly": { "type": "boolean", "description": "When true, only list/search/get/groups(list,members) are available; no writes.", "default": false },
-      "groups": { "type": "array", "items": { "type": "string" }, "description": "Optional allowlist: only contacts that belong to one of these group names are visible or editable. Empty = all.", "default": [] },
+      "groups": { "type": "array", "items": { "type": "string" }, "description": "Optional read-only allowlist: only these groups and their current members are visible. Empty = all.", "default": [] },
       "defaultLimit": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Default number of contacts returned by list/search (default 25)", "default": 25 },
       "maxContacts": { "type": "integer", "minimum": 100, "maximum": 50000, "description": "Refuse to sync address books larger than this (default 10000)", "default": 10000 }
     },
@@ -38,7 +38,7 @@
     "appPassword": { "label": "App-Specific Password", "sensitive": true, "help": "Generate at account.apple.com → Sign-In and Security → App-Specific Passwords (two-factor authentication required). Accepts a string, ${ENV_VAR}, or a SecretRef object. Never use your Apple Account password." },
     "serverUrl": { "label": "CardDAV Server URL", "placeholder": "https://contacts.icloud.com", "help": "Only change for a non-iCloud CardDAV server. Must be https.", "advanced": true },
     "readOnly": { "label": "Read Only", "help": "Disable create/update/delete and group mutations entirely." },
-    "groups": { "label": "Group Allowlist", "placeholder": "[\"Family\", \"Friends\"]", "help": "Restrict the agent to members of these groups. A strong privacy control for a shared address book.", "advanced": true },
+    "groups": { "label": "Group Allowlist", "placeholder": "[\"Family\", \"Friends\"]", "help": "Only return these groups and their current members; disable writes. This filters tool results, not the underlying iCloud credential.", "advanced": true },
     "defaultLimit": { "label": "Default Result Limit", "placeholder": "25", "advanced": true },
     "maxContacts": { "label": "Max Contacts", "placeholder": "10000", "advanced": true }
   },

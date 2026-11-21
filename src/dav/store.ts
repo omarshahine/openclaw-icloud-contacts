@@ -29,6 +29,8 @@ export interface StoreOptions {
   /** Do not re-sync more often than this (ms) */
   minRefreshIntervalMs: number;
   multigetChunk: number;
+  /** Require complete membership evidence for a dedicated full snapshot. */
+  strictSnapshot?: boolean;
 }
 
 const DEFAULTS: StoreOptions = { readOnly: false, maxContacts: 10_000, minRefreshIntervalMs: 10_000, multigetChunk: 100 };
@@ -97,19 +99,37 @@ export class ContactStore {
     const book = this.book!;
     const { responses, text } = await this.client.report(book.href, syncCollectionBody(this.syncToken), "1");
     const newToken = parseSyncToken(text);
+    const strict = this.opts.strictSnapshot;
+    const incomplete = () => new DavError("server_error", "The address book snapshot could not be verified. No scoped contacts are available until it can be refreshed.");
+    if (strict && !newToken) throw incomplete();
     const toFetch: string[] = [];
+    const expected = new Map<string, string>();
+    const seenUIDs = new Set<string>();
     const bookPath = new URL(book.href).pathname.replace(/\/+$/, "");
     for (const r of responses) {
+      if (strict && !r.href) throw incomplete();
       const href = this.client.resolve(r.href, book.href);
       // iCloud lists the collection itself (without trailing slash); skip it and anything that is not a member resource.
       const path = new URL(href).pathname.replace(/\/+$/, "");
-      if (path === bookPath || !path.startsWith(bookPath + "/")) continue;
+      if (path === bookPath && new URL(href).origin === new URL(book.href).origin) {
+        if (strict && r.status !== undefined && !(r.status >= 200 && r.status < 300)) throw incomplete();
+        continue;
+      }
+      if (new URL(href).origin !== new URL(book.href).origin || !path.startsWith(bookPath + "/")) {
+        if (strict) throw incomplete();
+        continue;
+      }
       if (r.status === 404 || (r.propstats.length > 0 && r.propstats.every((p) => p.status === 404))) {
+        if (strict) throw incomplete();
         this.removeLocal(href);
         continue;
       }
       const prop = okProp(r);
       const etag = prop ? textOf(childOf(prop, NS.DAV, "getetag")) || undefined : undefined;
+      if (strict) {
+        if (!etag || expected.has(href) || (r.status !== undefined && !(r.status >= 200 && r.status < 300))) throw incomplete();
+        expected.set(href, etag);
+      }
       const cur = this.entries.get(href);
       if (!cur || !etag || cur.etag !== etag) toFetch.push(href);
     }
@@ -119,15 +139,29 @@ export class ContactStore {
     for (let i = 0; i < toFetch.length; i += this.opts.multigetChunk) {
       const chunk = toFetch.slice(i, i + this.opts.multigetChunk);
       const { responses: got } = await this.client.report(book.href, multigetBody(chunk.map((h) => new URL(h).pathname)), "1");
+      const pending = new Set(chunk);
       for (const r of got) {
         const href = this.client.resolve(r.href, book.href);
         const prop = okProp(r);
-        if (!prop) continue;
+        if (!prop) {
+          if (strict) throw incomplete();
+          continue;
+        }
         const data = textOf(childOf(prop, NS.CARDDAV, "address-data"));
-        if (!data) continue;
+        if (!data) {
+          if (strict) throw incomplete();
+          continue;
+        }
         const etag = textOf(childOf(prop, NS.DAV, "getetag")) || undefined;
-        this.upsertLocal(href, etag, data);
+        if (strict && (!pending.delete(href) || etag !== expected.get(href) || (r.status !== undefined && !(r.status >= 200 && r.status < 300)))) throw incomplete();
+        const entry = this.upsertLocal(href, etag, data);
+        if (strict) {
+          const uid = (entry.group?.id ?? entry.contact?.id)?.toLowerCase();
+          if (entry.parseError || !uid || seenUIDs.has(uid)) throw incomplete();
+          seenUIDs.add(uid);
+        }
       }
+      if (strict && pending.size) throw incomplete();
     }
     if (newToken) this.syncToken = newToken;
   }
