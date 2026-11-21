@@ -230,12 +230,22 @@ export async function handleCreate(ctx: Context, raw: ContactInput): Promise<{ c
   return { contact: entry.contact };
 }
 
-function requireContactVersion(entry: Entry): string {
-  const etag = entry.etag;
-  if (!etag || etag.trim() !== etag || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag)) {
-    throw new DavError("conflict", "This contact has no usable strong version tag. No write was sent. Re-read the contact before attempting a new change.");
+function isStrongEtag(etag: unknown): etag is string {
+  return typeof etag === "string" && etag.trim() === etag && /^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag);
+}
+
+function requireExpectedEtag(etag: unknown): string {
+  if (!isStrongEtag(etag)) {
+    throw invalidInput("Read the contact first and pass its exact strong etag as expectedEtag. No write was sent.");
   }
   return etag;
+}
+
+function verifyContactVersion(ctx: Context, entry: Entry, expected: string): void {
+  if (entry.etag !== expected) {
+    ctx.store.reset();
+    throw new DavError("conflict", "The contact version does not match the one reviewed. No write was sent. Re-read the contact and review the change before retrying.");
+  }
 }
 
 async function writeExistingContact(ctx: Context, write: () => Promise<unknown>): Promise<void> {
@@ -250,14 +260,15 @@ async function writeExistingContact(ctx: Context, write: () => Promise<unknown>)
   }
 }
 
-export async function handleUpdate(ctx: Context, raw: { id: string } & ContactInput): Promise<{ contact: Contact }> {
+export async function handleUpdate(ctx: Context, raw: { id: string; expectedEtag: string } & ContactInput): Promise<{ contact: Contact }> {
   assertWriteEnabled(ctx);
-  const { id, ...rest } = raw;
+  const { id, expectedEtag, ...rest } = raw;
   const input = normaliseInput(rest as ContactInput & Record<string, unknown>);
   if (Object.keys(input).length === 0) throw invalidInput("Nothing to update: provide at least one field");
+  const etag = requireExpectedEtag(expectedEtag);
   const e = await locate(ctx, id);
   assertWritable(ctx);
-  const etag = requireContactVersion(e);
+  verifyContactVersion(ctx, e, etag);
   const vcard = patchContact(e.text, e.contact!, input);
   await writeExistingContact(ctx, () => ctx.session.client.put(e.href, vcard, { ifMatch: etag }));
   let entry: Entry;
@@ -276,11 +287,12 @@ export async function handleUpdate(ctx: Context, raw: { id: string } & ContactIn
   return { contact: groups?.length ? { ...entry.contact, groups } : entry.contact };
 }
 
-export async function handleDelete(ctx: Context, params: { id: string }): Promise<{ deleted: true; id: string; fullName: string }> {
+export async function handleDelete(ctx: Context, params: { id: string; expectedEtag: string }): Promise<{ deleted: true; id: string; fullName: string }> {
   assertWriteEnabled(ctx);
+  const etag = requireExpectedEtag(params.expectedEtag);
   const e = await locate(ctx, params.id);
   assertWritable(ctx);
-  const etag = requireContactVersion(e);
+  verifyContactVersion(ctx, e, etag);
   await writeExistingContact(ctx, () => ctx.session.client.delete(e.href, { ifMatch: etag }));
   const fullName = e.contact!.fullName;
   ctx.store.removeLocal(e.href);

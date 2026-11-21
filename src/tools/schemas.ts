@@ -115,9 +115,11 @@ export const getSchema = Type.Object(
 
 export const createSchema = Type.Object({ ...writableFields }, { additionalProperties: false });
 
-export const updateSchema = Type.Object({ id: Type.String({ description: "Contact id (vCard UID)" }), ...writableFields }, { additionalProperties: false });
+const expectedEtag = Type.String({ description: "Exact quoted etag from the contact you just reviewed with icloud_contacts_get. Never substitute a new value without reviewing the change." });
 
-export const deleteSchema = Type.Object({ id: Type.String({ description: "Contact id (vCard UID) to delete" }) }, { additionalProperties: false });
+export const updateSchema = Type.Object({ id: Type.String({ description: "Contact id (vCard UID)" }), expectedEtag, ...writableFields }, { additionalProperties: false });
+
+export const deleteSchema = Type.Object({ id: Type.String({ description: "Contact id (vCard UID) to delete" }), expectedEtag }, { additionalProperties: false });
 
 export const groupsSchema = Type.Object(
   {
