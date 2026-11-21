@@ -2,6 +2,7 @@ export type ErrorCode =
   | "auth_failed"
   | "not_found"
   | "conflict"
+  | "write_unconfirmed"
   | "read_only"
   | "invalid_input"
   | "server_error"

@@ -182,29 +182,47 @@ export async function handleCreate(ctx: Context, raw: ContactInput): Promise<{ c
   return { contact: entry.contact };
 }
 
+function requireContactVersion(entry: Entry): string {
+  const etag = entry.etag;
+  if (!etag || etag.trim() !== etag || !/^"[\x21\x23-\x7e\x80-\xff]*"$/.test(etag)) {
+    throw new DavError("conflict", "This contact has no usable strong version tag. No write was sent. Re-read the contact before attempting a new change.");
+  }
+  return etag;
+}
+
+async function writeExistingContact(ctx: Context, write: () => Promise<unknown>): Promise<void> {
+  try {
+    await write();
+  } catch (error) {
+    // A deliberate follow-up read should not serve the snapshot tied to this attempt.
+    if (error instanceof DavError && ["conflict", "write_unconfirmed", "not_found"].includes(error.code)) {
+      ctx.store.reset();
+    }
+    throw error;
+  }
+}
+
 export async function handleUpdate(ctx: Context, raw: { id: string } & ContactInput): Promise<{ contact: Contact }> {
   const { id, ...rest } = raw;
   const input = normaliseInput(rest as ContactInput & Record<string, unknown>);
   if (Object.keys(input).length === 0) throw invalidInput("Nothing to update: provide at least one field");
-  let e = await locate(ctx, id);
+  const e = await locate(ctx, id);
   assertWritable(ctx);
-  const attempt = async (entry: Entry) => {
-    const vcard = patchContact(entry.text, entry.contact!, input);
-    await ctx.session.client.put(entry.href, vcard, entry.etag ? { ifMatch: entry.etag } : {});
-  };
+  const etag = requireContactVersion(e);
+  const vcard = patchContact(e.text, e.contact!, input);
+  await writeExistingContact(ctx, () => ctx.session.client.put(e.href, vcard, { ifMatch: etag }));
+  let entry: Entry;
   try {
-    await attempt(e);
-  } catch (err) {
-    if (err instanceof DavError && err.code === "conflict") {
-      const fresh = await ctx.session.client.get(e.href);
-      e = ctx.store.upsertLocal(e.href, fresh.etag, fresh.text);
-      if (!e.contact) throw notFound(`Contact "${id}" changed on the server and can no longer be parsed`);
-      await attempt(e);
-    } else throw err;
+    const stored = await ctx.session.client.get(e.href);
+    entry = ctx.store.upsertLocal(e.href, stored.etag, stored.text);
+  } catch {
+    ctx.store.reset();
+    throw new DavError("write_unconfirmed", "The update was acknowledged, but the stored contact could not be read back. Check it before attempting another update.");
   }
-  const stored = await ctx.session.client.get(e.href);
-  const entry = ctx.store.upsertLocal(e.href, stored.etag, stored.text);
-  if (!entry.contact) throw new DavError("server_error", `Updated card could not be parsed back: ${entry.parseError}`);
+  if (!entry.contact || entry.contact.id !== e.contact!.id) {
+    ctx.store.reset();
+    throw new DavError("write_unconfirmed", "The update was acknowledged, but the stored contact could not be confirmed. Check it before attempting another update.");
+  }
   const groups = ctx.store.groupIndex().get(entry.contact.id);
   return { contact: groups?.length ? { ...entry.contact, groups } : entry.contact };
 }
@@ -212,14 +230,8 @@ export async function handleUpdate(ctx: Context, raw: { id: string } & ContactIn
 export async function handleDelete(ctx: Context, params: { id: string }): Promise<{ deleted: true; id: string; fullName: string }> {
   const e = await locate(ctx, params.id);
   assertWritable(ctx);
-  try {
-    await ctx.session.client.delete(e.href, e.etag ? { ifMatch: e.etag } : {});
-  } catch (err) {
-    if (err instanceof DavError && err.code === "conflict") {
-      const fresh = await ctx.session.client.get(e.href);
-      await ctx.session.client.delete(e.href, fresh.etag ? { ifMatch: fresh.etag } : {});
-    } else throw err;
-  }
+  const etag = requireContactVersion(e);
+  await writeExistingContact(ctx, () => ctx.session.client.delete(e.href, { ifMatch: etag }));
   const fullName = e.contact!.fullName;
   ctx.store.removeLocal(e.href);
   // Also drop membership from cached groups so results are consistent before next sync.

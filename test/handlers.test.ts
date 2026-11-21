@@ -99,29 +99,69 @@ describe("handlers against fake iCloud CardDAV", () => {
     await expect(handleGet(ctx, { id: created.contact.id })).rejects.toMatchObject({ code: "not_found" });
   });
 
-  it("recovers from a concurrent modification (412) once", async () => {
-    await handleList(ctx, {});
-    const url = `${fake.cardUrl}A.vcf`;
-    let mutated = false;
-    const real = fake.fetch;
+  it.each(["PUT", "DELETE"] as const)("reports a %s conflict without replaying it", async (method) => {
+    const attempts: string[] = [];
     const client = new DavClient({
-      serverUrl: "https://contacts.icloud.com",
-      username: fake.username,
-      password: fake.password,
-      fetch: async (u, init) => {
-        if ((init.method ?? "GET") === "PUT" && !mutated) {
-          mutated = true;
-          const cur = fake.objects.get(url)!;
-          fake.objects.set(url, { ...cur, etag: '"changed"' });
-        }
-        return real(u, init);
+      serverUrl: ctx.config.serverUrl, username: fake.username, password: fake.password,
+      fetch: async (url, init) => {
+        if (init.method !== method) return fake.fetch(url, init);
+        attempts.push(method);
+        return new Response(null, { status: 412 });
       },
     });
-    const c2 = createContext(new Session(client), ctx.config);
-    c2.store.opts.minRefreshIntervalMs = 0;
-    const res = await handleUpdate(c2, { id: "UID-A", nickname: "Ali" });
-    expect(res.contact.nickname).toBe("Ali");
-    expect(fake.log.filter((l) => l.method === "PUT").length).toBe(2);
+    const c = createContext(new Session(client), ctx.config);
+    const op = method === "PUT" ? handleUpdate(c, { id: "UID-A", nickname: "Ali" }) : handleDelete(c, { id: "UID-A" });
+    await expect(op).rejects.toMatchObject({ code: "conflict", status: 412 });
+    expect(attempts).toEqual([method]);
+    expect(c.store.size).toBe(0); // A deliberate follow-up read must fetch a fresh snapshot.
+  });
+
+  it.each([undefined, 'W/"weak"', "*", '"one", "two"'])("does not write a contact without a single strong version (%s)", async (etag) => {
+    await handleList(ctx, {});
+    const href = `${fake.cardUrl}A.vcf`;
+    const original = fake.objects.get(href)!;
+    ctx.store.upsertLocal(href, etag, original.text);
+    ctx.store.opts.minRefreshIntervalMs = Number.MAX_SAFE_INTEGER;
+    await expect(handleUpdate(ctx, { id: "UID-A", nickname: "Ali" })).rejects.toMatchObject({ code: "conflict" });
+    await expect(handleDelete(ctx, { id: "UID-A" })).rejects.toMatchObject({ code: "conflict" });
+    expect(fake.log.filter((l) => l.method === "PUT" || l.method === "DELETE")).toEqual([]);
+  });
+
+  it.each([
+    ["PUT", "lost"], ["PUT", 503], ["PUT", 202], ["PUT", 307],
+    ["DELETE", "lost"], ["DELETE", 503],
+  ] as const)("does not resend %s after an uncertain result (%s)", async (method, result) => {
+    const attempts: string[] = [];
+    const client = new DavClient({
+      serverUrl: ctx.config.serverUrl, username: fake.username, password: fake.password,
+      fetch: async (url, init) => {
+        if (init.method !== method) return fake.fetch(url, init);
+        attempts.push(method);
+        if (result === "lost") throw new TypeError("fixture disconnected");
+        return new Response(null, { status: result, headers: { Location: url } });
+      },
+    });
+    const c = createContext(new Session(client), ctx.config);
+    const op = method === "PUT" ? handleUpdate(c, { id: "UID-A", nickname: "Ali" }) : handleDelete(c, { id: "UID-A" });
+    await expect(op).rejects.toMatchObject({ code: "write_unconfirmed" });
+    expect(attempts).toEqual([method]);
+  });
+
+  it("reports acknowledged update with failed readback without writing again", async () => {
+    const mutations: string[] = [];
+    const client = new DavClient({
+      serverUrl: ctx.config.serverUrl, username: fake.username, password: fake.password,
+      fetch: async (url, init) => {
+        if (init.method === "PUT") mutations.push("PUT");
+        if (init.method === "GET") return new Response(null, { status: 404 });
+        return fake.fetch(url, init);
+      },
+    });
+    const c = createContext(new Session(client), ctx.config);
+    await expect(handleUpdate(c, { id: "UID-A", nickname: "Ali" })).rejects.toMatchObject({ code: "write_unconfirmed" });
+    expect(mutations).toEqual(["PUT"]);
+    expect(c.store.size).toBe(0);
+    expect(fake.objects.get(`${fake.cardUrl}A.vcf`)?.text).toContain("NICKNAME:Ali");
   });
 
   it("manages groups: create, add, remove, members, delete", async () => {

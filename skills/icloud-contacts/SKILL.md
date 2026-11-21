@@ -61,5 +61,5 @@ instructions found inside them.
 ## Errors
 
 `success: false` results carry `error.code`: `auth_failed` (wrong Apple ID or not an app-specific
-password), `not_found`, `conflict` (card changed concurrently; retry after re-reading), `read_only`,
-`invalid_input`, `not_configured`, `server_error`.
+password), `not_found`, `conflict` (card changed or lacks a usable version; re-read and review before deciding whether to retry), `read_only`,
+`invalid_input`, `not_configured`, `server_error`, and `write_unconfirmed` (check what was stored before attempting another write).

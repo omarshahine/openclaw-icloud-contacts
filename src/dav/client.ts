@@ -5,7 +5,7 @@
  * - Manual redirect following so the Authorization header survives the
  *   caldav.icloud.com -> pNN-caldav.icloud.com hop (fetch strips auth on
  *   cross-origin redirects when following automatically)
- * - One retry on 5xx / network failure
+ * - One retry for read requests on 5xx / network failure; no write replay
  * - Maps HTTP status to typed DavError codes; never echoes credentials
  */
 
@@ -90,6 +90,7 @@ export class DavClient {
     url: string,
     opts: { headers?: Record<string, string>; body?: string; depth?: "0" | "1" | "infinity" } = {},
   ): Promise<DavResponse> {
+    const readOnly = ["GET", "HEAD", "OPTIONS", "PROPFIND", "REPORT"].includes(method);
     let current = url;
     let attempt = 0;
     let redirects = 0;
@@ -122,6 +123,7 @@ export class DavClient {
           clearTimeout(timer);
         }
       } catch (e) {
+        if (!readOnly) throw new DavError("write_unconfirmed", "The server did not confirm the write. Check the stored record before attempting it again.");
         if (attempt === 0) {
           attempt++;
           await sleep(500);
@@ -130,7 +132,9 @@ export class DavClient {
         throw new DavError("server_error", `Network error talking to CardDAV server: ${describe(e)}`);
       }
 
+      if (!readOnly && res.body) void res.body.cancel().catch(() => {});
       if (res.status >= 300 && res.status < 400) {
+        if (!readOnly) throw new DavError("write_unconfirmed", "Received a redirect while writing. Check the stored record before attempting it again.", res.status);
         const loc = res.headers.get("location");
         if (!loc || redirects >= MAX_REDIRECTS) {
           throw new DavError("server_error", `Too many redirects or missing Location (status ${res.status})`, res.status);
@@ -144,13 +148,20 @@ export class DavClient {
         continue;
       }
 
+      if (res.status >= 500 && !readOnly) {
+        throw new DavError("write_unconfirmed", "The server returned an error while writing. Check the stored record before attempting it again.", res.status);
+      }
       if (res.status >= 500 && attempt === 0) {
         attempt++;
         await sleep(500);
         continue;
       }
 
-      const text = await res.text();
+      // Mutation outcomes depend on status and headers, not the response body.
+      if (!readOnly && res.status === 202) {
+        throw new DavError("write_unconfirmed", "The server accepted the write for processing but did not confirm completion. Check the stored record before attempting it again.", res.status);
+      }
+      const text = readOnly ? await res.text() : "";
       this.throwForStatus(res.status, method, current, text);
       return { status: res.status, headers: res.headers, text, url: current };
     }
@@ -170,7 +181,7 @@ export class DavClient {
       case 404:
         throw new DavError("not_found", `${method} ${path}: not found`, status);
       case 412:
-        throw new DavError("conflict", `${method} ${path}: precondition failed (the event changed on the server)`, status);
+        throw new DavError("conflict", `${method} ${path}: precondition failed (the record changed on the server)`, status);
       case 423:
         throw new DavError("conflict", `${method} ${path}: resource is locked`, status);
       default:
