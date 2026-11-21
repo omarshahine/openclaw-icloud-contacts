@@ -287,17 +287,17 @@ export async function handleUpdate(ctx: Context, raw: { id: string; expectedEtag
   return { contact: groups?.length ? { ...entry.contact, groups } : entry.contact };
 }
 
-export async function handleDelete(ctx: Context, params: { id: string; expectedEtag: string }): Promise<{ deleted: true; id: string; fullName: string }> {
+export async function handleDelete(ctx: Context, params: { id: string; expectedEtag: string }): Promise<{ deleted: true; id: string }> {
   assertWriteEnabled(ctx);
   const etag = requireExpectedEtag(params.expectedEtag);
   const e = await locate(ctx, params.id);
   assertWritable(ctx);
   verifyContactVersion(ctx, e, etag);
   await writeExistingContact(ctx, () => ctx.session.client.delete(e.href, { ifMatch: etag }));
-  const fullName = e.contact!.fullName;
   ctx.store.removeLocal(e.href);
   // Also drop membership from cached groups so results are consistent before next sync.
-  return { deleted: true, id: e.contact!.id, fullName };
+  // The caller already supplied this ID. Do not echo contact-authored text after deletion.
+  return { deleted: true, id: params.id.trim() };
 }
 
 // ---------------------------------------------------------------------------
