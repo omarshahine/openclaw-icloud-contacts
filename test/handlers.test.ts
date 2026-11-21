@@ -86,18 +86,20 @@ describe("handlers against fake iCloud CardDAV", () => {
     // visible in list right away (local upsert) and after sync
     expect((await handleList(ctx, {})).contacts.map((c) => c.id)).toContain(created.contact.id);
 
-    const upd = await handleUpdate(ctx, { id: created.contact.id, jobTitle: "Engineer", phones: [{ label: "iPhone", value: "+1 555 0101" }, { label: "Batphone", value: "+1 555 0102" }] });
+    const upd = await handleUpdate(ctx, { id: created.contact.id, expectedEtag: created.contact.etag!, jobTitle: "Engineer", phones: [{ label: "iPhone", value: "+1 555 0101" }, { label: "Batphone", value: "+1 555 0102" }] });
     expect(upd.contact.jobTitle).toBe("Engineer");
     expect(upd.contact.phones).toEqual([{ label: "iPhone", value: "+1 555 0101" }, { label: "Batphone", value: "+1 555 0102" }]);
     expect(upd.contact.emails).toEqual([{ label: "work", value: "dana@x.example" }]); // untouched
     const updatePut = fake.log.filter((l) => l.method === "PUT")[1];
     expect(updatePut.headers["if-match"]).toBe(created.contact.etag);
-    await expect(handleUpdate(ctx, { id: created.contact.id })).rejects.toMatchObject({ code: "invalid_input" });
+    await expect(handleUpdate(ctx, { id: created.contact.id, expectedEtag: upd.contact.etag! })).rejects.toMatchObject({ code: "invalid_input" });
 
-    const del = await handleDelete(ctx, { id: created.contact.id });
+    const del = await handleDelete(ctx, { id: created.contact.id, expectedEtag: upd.contact.etag! });
     expect(del).toMatchObject({ deleted: true, fullName: "Dana Diaz" });
     await expect(handleGet(ctx, { id: created.contact.id })).rejects.toMatchObject({ code: "not_found" });
   });
+
+  const initialTag = () => fake.objects.get(`${fake.cardUrl}A.vcf`)!.etag;
 
   it.each(["PUT", "DELETE"] as const)("reports a %s conflict without replaying it", async (method) => {
     const attempts: string[] = [];
@@ -110,7 +112,7 @@ describe("handlers against fake iCloud CardDAV", () => {
       },
     });
     const c = createContext(new Session(client), ctx.config);
-    const op = method === "PUT" ? handleUpdate(c, { id: "UID-A", nickname: "Ali" }) : handleDelete(c, { id: "UID-A" });
+    const op = method === "PUT" ? handleUpdate(c, { id: "UID-A", expectedEtag: initialTag(), nickname: "Ali" }) : handleDelete(c, { id: "UID-A", expectedEtag: initialTag() });
     await expect(op).rejects.toMatchObject({ code: "conflict", status: 412 });
     expect(attempts).toEqual([method]);
     expect(c.store.size).toBe(0); // A deliberate follow-up read must fetch a fresh snapshot.
@@ -122,9 +124,26 @@ describe("handlers against fake iCloud CardDAV", () => {
     const original = fake.objects.get(href)!;
     ctx.store.upsertLocal(href, etag, original.text);
     ctx.store.opts.minRefreshIntervalMs = Number.MAX_SAFE_INTEGER;
-    await expect(handleUpdate(ctx, { id: "UID-A", nickname: "Ali" })).rejects.toMatchObject({ code: "conflict" });
-    await expect(handleDelete(ctx, { id: "UID-A" })).rejects.toMatchObject({ code: "conflict" });
+    await expect(handleUpdate(ctx, { id: "UID-A", expectedEtag: initialTag(), nickname: "Ali" })).rejects.toMatchObject({ code: "conflict" });
+    await handleList(ctx, {});
+    ctx.store.upsertLocal(href, etag, original.text);
+    await expect(handleDelete(ctx, { id: "UID-A", expectedEtag: initialTag() })).rejects.toMatchObject({ code: "conflict" });
     expect(fake.log.filter((l) => l.method === "PUT" || l.method === "DELETE")).toEqual([]);
+  });
+
+  it.each([undefined, 'W/"weak"', "*", '"one", "two"', '"valid"\n'])("rejects a missing or invalid caller version (%s)", async (expectedEtag) => {
+    await expect(handleDelete(ctx, { id: "UID-A", expectedEtag: expectedEtag! })).rejects.toMatchObject({ code: "invalid_input" });
+    expect(fake.log).toHaveLength(0);
+  });
+
+  it("requires a fresh decision when a contact changes between review and write", async () => {
+    const reviewed = await handleGet(ctx, { id: "UID-A" });
+    fake.seed("A.vcf", vcard({ uid: "UID-A", given: "Alice", family: "Anders", note: "New information" }));
+    const expectedEtag = reviewed.etag!;
+    await expect(handleUpdate(ctx, { id: reviewed.id, expectedEtag, notes: "Older decision" })).rejects.toMatchObject({ code: "conflict" });
+    await expect(handleDelete(ctx, { id: reviewed.id, expectedEtag })).rejects.toMatchObject({ code: "conflict" });
+    expect(fake.log.filter((r) => r.method === "PUT" || r.method === "DELETE")).toEqual([]);
+    expect((await handleGet(ctx, { id: reviewed.id })).notes).toBe("New information");
   });
 
   it.each([
@@ -142,7 +161,7 @@ describe("handlers against fake iCloud CardDAV", () => {
       },
     });
     const c = createContext(new Session(client), ctx.config);
-    const op = method === "PUT" ? handleUpdate(c, { id: "UID-A", nickname: "Ali" }) : handleDelete(c, { id: "UID-A" });
+    const op = method === "PUT" ? handleUpdate(c, { id: "UID-A", expectedEtag: initialTag(), nickname: "Ali" }) : handleDelete(c, { id: "UID-A", expectedEtag: initialTag() });
     await expect(op).rejects.toMatchObject({ code: "write_unconfirmed" });
     expect(attempts).toEqual([method]);
   });
@@ -158,7 +177,7 @@ describe("handlers against fake iCloud CardDAV", () => {
       },
     });
     const c = createContext(new Session(client), ctx.config);
-    await expect(handleUpdate(c, { id: "UID-A", nickname: "Ali" })).rejects.toMatchObject({ code: "write_unconfirmed" });
+    await expect(handleUpdate(c, { id: "UID-A", expectedEtag: initialTag(), nickname: "Ali" })).rejects.toMatchObject({ code: "write_unconfirmed" });
     expect(mutations).toEqual(["PUT"]);
     expect(c.store.size).toBe(0);
     expect(fake.objects.get(`${fake.cardUrl}A.vcf`)?.text).toContain("NICKNAME:Ali");
@@ -187,7 +206,7 @@ describe("handlers against fake iCloud CardDAV", () => {
     await expect(handleGet(scoped, { id: "UID-A" })).rejects.toMatchObject({ code: "not_found" });
     const ro = makeCtx(fake, { readOnly: true });
     await expect(handleCreate(ro, { givenName: "X" })).rejects.toMatchObject({ code: "read_only" });
-    await expect(handleDelete(ro, { id: "UID-A" })).rejects.toMatchObject({ code: "read_only" });
+    await expect(handleDelete(ro, { id: "UID-A", expectedEtag: initialTag() })).rejects.toMatchObject({ code: "read_only" });
     expect((await handleGet(ro, { id: "UID-A" })).readOnly).toBe(true);
   });
 
@@ -211,8 +230,8 @@ describe("handlers against fake iCloud CardDAV", () => {
   it("denies all scoped mutations before contacting CardDAV", async () => {
     const scoped = makeCtx(fake, { groups: ["Friends"] });
     await expect(handleCreate(scoped, { givenName: "New" })).rejects.toMatchObject({ code: "read_only" });
-    await expect(handleUpdate(scoped, { id: "UID-B", nickname: "B" })).rejects.toMatchObject({ code: "read_only" });
-    await expect(handleDelete(scoped, { id: "UID-B" })).rejects.toMatchObject({ code: "read_only" });
+    await expect(handleUpdate(scoped, { id: "UID-B", expectedEtag: initialTag(), nickname: "B" })).rejects.toMatchObject({ code: "read_only" });
+    await expect(handleDelete(scoped, { id: "UID-B", expectedEtag: initialTag() })).rejects.toMatchObject({ code: "read_only" });
     for (const action of ["create", "add", "remove", "delete"] as const) {
       await expect(handleGroups(scoped, { action, group: "Friends", name: "New", contactIds: ["UID-B"] }))
         .rejects.toMatchObject({ code: "read_only" });
@@ -279,6 +298,6 @@ describe("handlers against fake iCloud CardDAV", () => {
     expect(res.contact.phones).toEqual([{ label: "other", value: "+1 555 0000" }]);
     const listed = await handleList(ctx, { limit: null, offset: null, group: null, fields: null });
     expect(listed.contacts.length).toBeGreaterThan(0);
-    await handleDelete(ctx, { id: res.contact.id });
+    await handleDelete(ctx, { id: res.contact.id, expectedEtag: res.contact.etag! });
   });
 });

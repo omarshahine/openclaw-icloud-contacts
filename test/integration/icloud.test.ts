@@ -23,7 +23,11 @@ describe.skipIf(!enabled)("live iCloud CardDAV", () => {
   let groupName: string | undefined;
 
   afterAll(async () => {
-    if (contactId) await handleDelete(ctx, { id: contactId }).catch(() => undefined);
+    if (contactId) {
+      const id = contactId;
+      const existing = await handleGet(ctx, { id }).catch(() => undefined);
+      if (existing?.etag) await handleDelete(ctx, { id, expectedEtag: existing.etag }).catch(() => undefined);
+    }
     if (groupName) await handleGroups(ctx, { action: "delete", group: groupName }).catch(() => undefined);
   });
 
@@ -86,7 +90,7 @@ describe.skipIf(!enabled)("live iCloud CardDAV", () => {
     const byPhone = await handleSearch(ctx, { query: "5550100100", field: "phone" });
     expect(byPhone.contacts.map((c) => c.id)).toContain(contactId);
 
-    const upd = await handleUpdate(ctx, { id: contactId, jobTitle: "Tester", phones: [{ label: "iPhone", value: "+1 555 010 0101" }], notes: "" });
+    const upd = await handleUpdate(ctx, { id: contactId, expectedEtag: created.contact.etag!, jobTitle: "Tester", phones: [{ label: "iPhone", value: "+1 555 010 0101" }], notes: "" });
     expect(upd.contact.jobTitle).toBe("Tester");
     expect(upd.contact.phones).toEqual([{ label: "iPhone", value: "+1 555 010 0101" }]);
     expect(upd.contact.notes).toBeUndefined();
@@ -96,7 +100,7 @@ describe.skipIf(!enabled)("live iCloud CardDAV", () => {
     expect(got.jobTitle).toBe("Tester");
     expect(got.socialProfiles[0]).toMatchObject({ service: "github", username: "openclaw-test" });
 
-    const del = await handleDelete(ctx, { id: contactId });
+    const del = await handleDelete(ctx, { id: contactId, expectedEtag: got.etag! });
     expect(del.deleted).toBe(true);
     contactId = undefined;
   });
@@ -116,7 +120,7 @@ describe.skipIf(!enabled)("live iCloud CardDAV", () => {
     expect(after.contacts.length).toBe(0);
     await handleGroups(ctx, { action: "delete", group: groupName });
     groupName = undefined;
-    await handleDelete(ctx, { id: contactId });
+    await handleDelete(ctx, { id: contactId, expectedEtag: got.etag! });
     contactId = undefined;
   });
 });

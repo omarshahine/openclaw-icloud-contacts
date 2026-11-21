@@ -161,7 +161,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
       api.registerTool({
         name: "icloud_contacts_update",
         label: "iCloud Contacts Update",
-        description: "Update fields on an existing iCloud contact by id. Only supplied fields change; arrays (emails, phones, urls, addresses, ...) replace the whole list, so read the contact first and send the full desired list. Empty string or null clears a field.",
+        description: "Update fields on an existing iCloud contact by id and expectedEtag from the version you reviewed. Only supplied fields change; arrays (emails, phones, urls, addresses, ...) replace the whole list, so read the contact first and send the full desired list. Empty string or null clears a field.",
         parameters: updateSchema,
         async execute(_id: string, params: Record<string, unknown>) {
           try {
@@ -177,7 +177,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
       api.registerTool({
         name: "icloud_contacts_delete",
         label: "iCloud Contacts Delete",
-        description: "Delete an iCloud contact by id. Irreversible; confirm with the user before calling.",
+        description: "Delete an iCloud contact by id and expectedEtag from the version you reviewed. Irreversible; confirm with the user before calling.",
         parameters: deleteSchema,
         async execute(_id: string, params: Record<string, unknown>) {
           try {

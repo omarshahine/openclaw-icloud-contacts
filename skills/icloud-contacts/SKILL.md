@@ -29,13 +29,14 @@ with cheap delta syncs; searches run locally and are case-insensitive.
 | `icloud_contacts_list` | Browse (sorted by name) with `limit`/`offset`, optionally one `group`. |
 | `icloud_contacts_groups` | `list` groups, `members` of a group, `create`, `add`/`remove` contact ids, `delete`. |
 | `icloud_contacts_create` | New contact. Needs a name (givenName/familyName) or organization. |
-| `icloud_contacts_update` | Change fields by `id`. Only supplied fields change; arrays replace the whole list. |
-| `icloud_contacts_delete` | Remove a contact by `id`. Irreversible. |
+| `icloud_contacts_update` | Change fields by `id` with `expectedEtag`. Only supplied fields change; arrays replace the whole list. |
+| `icloud_contacts_delete` | Remove a contact by `id` with `expectedEtag`. Irreversible. |
 
 Write tools are absent when the plugin is configured read-only.
 
 ## Result shapes
 
+- Before an edit or delete, read the contact, review the intended change, and pass its exact quoted `etag` as `expectedEtag`. After a conflict, read and review again rather than automatically retrying.
 - A configured group allowlist makes the plugin read-only. It only returns allowed groups and their current members.
 - `search`/`list` return **brief** records: `id, fullName, givenName, familyName, organization, emails[], phones[], birthday, groups[]`. Pass `fields: "full"` for complete records.
 - `get`/`create`/`update` return the **full** record with labeled entries: `emails: [{label, value}]`,
