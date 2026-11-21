@@ -97,9 +97,9 @@ export class ContactStore {
 
   private async syncOnce(): Promise<void> {
     const book = this.book!;
-    const { responses, text } = await this.client.report(book.href, syncCollectionBody(this.syncToken), "1");
-    const newToken = parseSyncToken(text);
     const strict = this.opts.strictSnapshot;
+    const { responses, text } = await this.client.report(book.href, syncCollectionBody(this.syncToken), "1", strict);
+    const newToken = parseSyncToken(text);
     const incomplete = () => new DavError("server_error", "The address book snapshot could not be verified. No scoped contacts are available until it can be refreshed.");
     if (strict && !newToken) throw incomplete();
     const toFetch: string[] = [];
@@ -138,7 +138,7 @@ export class ContactStore {
     }
     for (let i = 0; i < toFetch.length; i += this.opts.multigetChunk) {
       const chunk = toFetch.slice(i, i + this.opts.multigetChunk);
-      const { responses: got } = await this.client.report(book.href, multigetBody(chunk.map((h) => new URL(h).pathname)), "1");
+      const { responses: got } = await this.client.report(book.href, multigetBody(chunk.map((h) => new URL(h).pathname)), "1", strict);
       const pending = new Set(chunk);
       for (const r of got) {
         const href = this.client.resolve(r.href, book.href);

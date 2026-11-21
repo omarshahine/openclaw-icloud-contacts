@@ -53,10 +53,21 @@ export function escapeXml(s: string): string {
 interface Frame {
   node: XmlNode;
   nsMap: Record<string, string>;
+  qname?: string;
 }
 
-function parseAttrs(raw: string): Record<string, string> {
-  const attrs: Record<string, string> = {};
+function parseAttrs(raw: string, strict = false): Record<string, string> {
+  const attrs: Record<string, string> = Object.create(null);
+  if (strict) {
+    const re = /\s+([A-Za-z_][\w.:-]*)\s*=\s*(?:"([^"<]*)"|'([^'<]*)')/y;
+    for (let offset = 0; raw.slice(offset).trim(); offset = re.lastIndex) {
+      re.lastIndex = offset;
+      const attr = re.exec(raw);
+      if (!attr || Object.hasOwn(attrs, attr[1])) throw new Error("Malformed XML: invalid attribute");
+      attrs[attr[1]] = decodeEntities(attr[2] ?? attr[3]);
+    }
+    return attrs;
+  }
   const re = /([^\s=]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(raw))) {
@@ -65,7 +76,7 @@ function parseAttrs(raw: string): Record<string, string> {
   return attrs;
 }
 
-export function parseXml(input: string): XmlNode {
+export function parseXml(input: string, strict = false): XmlNode {
   const root: XmlNode = { ns: "", local: "#document", attrs: {}, children: [], text: "" };
   const stack: Frame[] = [{ node: root, nsMap: { xml: "http://www.w3.org/XML/1998/namespace" } }];
   let i = 0;
@@ -87,11 +98,13 @@ export function parseXml(input: string): XmlNode {
 
     if (input.startsWith("<!--", lt)) {
       const end = input.indexOf("-->", lt + 4);
+      if (strict && end === -1) throw new Error("Malformed XML: unterminated comment");
       i = end === -1 ? n : end + 3;
       continue;
     }
     if (input.startsWith("<![CDATA[", lt)) {
       const end = input.indexOf("]]>", lt + 9);
+      if (strict && (end === -1 || stack.length === 1)) throw new Error("Malformed XML: invalid CDATA");
       const content = end === -1 ? input.slice(lt + 9) : input.slice(lt + 9, end);
       stack[stack.length - 1].node.text += content;
       i = end === -1 ? n : end + 3;
@@ -99,10 +112,12 @@ export function parseXml(input: string): XmlNode {
     }
     if (input.startsWith("<?", lt)) {
       const end = input.indexOf("?>", lt + 2);
+      if (strict && end === -1) throw new Error("Malformed XML: unterminated instruction");
       i = end === -1 ? n : end + 2;
       continue;
     }
     if (input.startsWith("<!", lt)) {
+      if (strict) throw new Error("Malformed XML: unsupported declaration");
       // DOCTYPE or similar: skip to '>'
       const end = input.indexOf(">", lt + 2);
       i = end === -1 ? n : end + 1;
@@ -129,6 +144,9 @@ export function parseXml(input: string): XmlNode {
 
     if (tag[0] === "/") {
       // closing tag
+      if (strict && (stack.length === 1 || tag.slice(1).trimEnd() !== stack.at(-1)?.qname)) {
+        throw new Error("Malformed XML: mismatched closing tag");
+      }
       if (stack.length > 1) stack.pop();
       continue;
     }
@@ -137,7 +155,8 @@ export function parseXml(input: string): XmlNode {
     const body = selfClosing ? tag.slice(0, -1) : tag;
     const spaceIdx = body.search(/\s/);
     const qname = spaceIdx === -1 ? body : body.slice(0, spaceIdx);
-    const attrs = spaceIdx === -1 ? {} : parseAttrs(body.slice(spaceIdx));
+    if (strict && !/^[A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?$/.test(qname)) throw new Error("Malformed XML: invalid element name");
+    const attrs = spaceIdx === -1 ? {} : parseAttrs(body.slice(spaceIdx), strict);
 
     const parentMap = stack[stack.length - 1].nsMap;
     let nsMap = parentMap;
@@ -150,11 +169,15 @@ export function parseXml(input: string): XmlNode {
     const colon = qname.indexOf(":");
     const prefix = colon === -1 ? "" : qname.slice(0, colon);
     const local = colon === -1 ? qname : qname.slice(colon + 1);
+    if (strict && prefix && !Object.hasOwn(nsMap, prefix)) throw new Error("Malformed XML: undeclared prefix");
     const ns = nsMap[prefix] ?? "";
 
     const node: XmlNode = { ns, local, attrs, children: [], text: "" };
     stack[stack.length - 1].node.children.push(node);
-    if (!selfClosing) stack.push({ node, nsMap });
+    if (!selfClosing) stack.push({ node, nsMap, qname });
+  }
+  if (strict && (stack.length !== 1 || root.children.length !== 1 || root.text.trim())) {
+    throw new Error("Malformed XML: incomplete document");
   }
   return root;
 }
@@ -215,9 +238,11 @@ function parseStatusLine(s: string): number {
   return m ? parseInt(m[1], 10) : NaN;
 }
 
-export function parseMultiStatus(xml: string): MultiStatusResponse[] {
-  const doc = parseXml(xml);
-  const responses = findAll(doc, NS.DAV, "response");
+export function parseMultiStatus(xml: string, strict = false): MultiStatusResponse[] {
+  const doc = parseXml(xml, strict);
+  const root = doc.children[0];
+  if (strict && (root?.ns !== NS.DAV || root.local !== "multistatus")) throw new Error("Malformed XML: expected a DAV multistatus");
+  const responses = strict ? childrenOf(root, NS.DAV, "response") : findAll(doc, NS.DAV, "response");
   return responses.map((r) => {
     const href = textOf(childOf(r, NS.DAV, "href"));
     const statusNode = childOf(r, NS.DAV, "status");

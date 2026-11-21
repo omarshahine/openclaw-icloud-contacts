@@ -199,9 +199,9 @@ export class DavClient {
     return { responses: parseMultiStatus(res.text), url: res.url };
   }
 
-  async report(url: string, body: string, depth: "0" | "1" = "1"): Promise<{ responses: MultiStatusResponse[]; text: string }> {
+  async report(url: string, body: string, depth: "0" | "1" = "1", strictXml = false): Promise<{ responses: MultiStatusResponse[]; text: string }> {
     const res = await this.request("REPORT", url, { body, depth });
-    return { responses: parseMultiStatus(res.text), text: res.text };
+    return { responses: parseMultiStatus(res.text, strictXml), text: res.text };
   }
 
   async get(url: string): Promise<{ text: string; etag?: string }> {

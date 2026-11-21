@@ -329,3 +329,20 @@ describe("credential trust boundary", () => {
     expect((await client.request("GET", "https://p42-contacts.icloud.com/ok")).text).toBe("ok");
   });
 });
+
+
+describe("strict DAV XML structure", () => {
+  it("accepts a complete namespaced document", () => {
+    expect(parseMultiStatus('<m:multistatus xmlns:m="DAV:"><m:response><m:href>/sample</m:href></m:response></m:multistatus>', true))
+      .toEqual([{ href: "/sample", status: undefined, propstats: [] }]);
+  });
+
+  it.each([
+    '<m:multistatus xmlns:m="DAV:"><m:response>',
+    '<m:multistatus xmlns:m="DAV:"></m:wrong>',
+    '<m:multistatus xmlns:m="DAV:"/><m:extra xmlns:m="DAV:"/>',
+    '<m:multistatus xmlns:m="DAV:" invalid />',
+  ])("rejects incomplete or malformed XML", (xml) => {
+    expect(() => parseMultiStatus(xml, true)).toThrow("Malformed XML");
+  });
+});
