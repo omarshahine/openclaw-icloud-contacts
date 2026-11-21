@@ -83,15 +83,15 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
   Unknown properties are preserved on update.
 - **Photos** are external URIs on iCloud; `photoUrl` is always returned, `includePhoto=true` fetches
   it (authenticated) and returns base64. Photos larger than 5 MB are not returned.
-- **Credential hygiene.** The Apple ID and app password are sent only to hosts within the configured
-  server's domain (`*.icloud.com` by default). Redirects to other hosts are refused, and photo URLs on
-  other hosts are not fetched, so a shared card cannot steer your credentials elsewhere.
+- **Credential hygiene.** Credentials are sent only to the configured server origin (scheme, host,
+  and port). Default iCloud discovery also allows Apple's numbered Contacts partition hosts over
+  HTTPS on port 443. Redirects and photos outside those origins are not fetched.
 - **Groups** are Apple `X-ADDRESSBOOKSERVER-KIND:group` cards; membership is by contact UID.
 - **Concurrency.** Contact edits and deletes require `expectedEtag`, the exact quoted `etag` returned by `icloud_contacts_get` for the contact version you reviewed. The plugin never substitutes a newer version or retries a conflict. A lost or uncertain write response returns `write_unconfirmed`; check the stored record before deciding whether to try again. CardDAV read requests still tolerate one transient retry.
 - **Rate limits.** iCloud throttles roughly 15-20 writes/minute (503). The plugin has no bulk write
   tool on purpose; batch mutations should be paced.
 - **Untrusted content.** Names, organizations, titles, nicknames and notes are wrapped in per-session
-  `[UNTRUSTED_CONTACT_DATA_...]` markers and instruction-like text is flagged.
+  `[UNTRUSTED_CONTACT_DATA_...]` markers and instruction-like text is flagged. Deletion responses contain only status and the requested ID.
 - **Errors.** `error.code`: `auth_failed`, `not_found`, `conflict`, `read_only`, `invalid_input`,
   `not_configured`, `server_error`, `write_unconfirmed`.
 

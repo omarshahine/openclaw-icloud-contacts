@@ -3,7 +3,7 @@
  *
  * - HTTP Basic auth (Apple ID + app-specific password) over TLS
  * - Manual redirect following so the Authorization header survives the
- *   caldav.icloud.com -> pNN-caldav.icloud.com hop (fetch strips auth on
+ *   contacts.icloud.com -> pNN-contacts.icloud.com hop (fetch strips auth on
  *   cross-origin redirects when following automatically)
  * - One retry for read requests on 5xx / network failure; no write replay
  * - Maps HTTP status to typed DavError codes; never echoes credentials
@@ -34,22 +34,12 @@ export interface DavResponse {
 
 const MAX_REDIRECTS = 5;
 
-/**
- * Registrable-domain heuristic: the last two labels, or three for
- * two-part public suffixes such as .com.cn / .co.uk.
- */
-export function baseDomain(hostname: string): string {
-  const parts = hostname.toLowerCase().split(".");
-  if (parts.length <= 2) return parts.join(".");
-  const tld2 = parts.slice(-2).join(".");
-  if (/^(com|co|org|net|gov|edu|ac)\.[a-z]{2}$/.test(tld2)) return parts.slice(-3).join(".");
-  return tld2;
-}
+const ICLOUD_CONTACTS_ORIGIN = "https://contacts.icloud.com";
+const ICLOUD_CONTACTS_PARTITION = /^p[0-9]+-contacts\.icloud\.com$/;
 
 export class DavClient {
   readonly serverUrl: string;
-  /** Credentials are only ever sent to hosts within this registrable domain (from serverUrl). */
-  readonly trustedDomain: string;
+  private readonly configuredOrigin: string;
   private readonly authHeader: string;
   private readonly fetchImpl: FetchLike;
   private readonly timeoutMs: number;
@@ -57,24 +47,27 @@ export class DavClient {
 
   constructor(opts: ClientOptions) {
     const url = new URL(opts.serverUrl);
-    if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
-      throw new DavError("invalid_input", "serverUrl must use https (credentials are sent with HTTP Basic auth)");
+    const isLoopbackHttp = url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname);
+    if (url.username || url.password || (url.protocol !== "https:" && !isLoopbackHttp)) {
+      throw new DavError("invalid_input", "serverUrl must use HTTPS without embedded credentials (HTTP is supported only on loopback)");
     }
     this.serverUrl = url.toString();
-    this.trustedDomain = baseDomain(url.hostname);
+    this.configuredOrigin = url.origin;
     this.authHeader = "Basic " + Buffer.from(`${opts.username}:${opts.password}`, "utf8").toString("base64");
     this.fetchImpl = opts.fetch ?? ((input, init) => fetch(input, init));
     this.timeoutMs = opts.timeoutMs ?? 30_000;
     this.userAgent = opts.userAgent ?? "openclaw-icloud-contacts/0.1";
   }
 
-  /** True if credentials may be sent to this URL (same registrable domain as serverUrl, https). */
+  /** Only the configured origin, plus Apple's numbered Contacts partitions for default iCloud. */
   isTrustedUrl(url: string): boolean {
     try {
       const u = new URL(url);
-      if (u.protocol !== "https:" && !(u.hostname === "localhost" || u.hostname === "127.0.0.1")) return false;
-      const host = u.hostname.toLowerCase();
-      return host === this.trustedDomain || host.endsWith("." + this.trustedDomain);
+      if (u.username || u.password || !["https:", "http:"].includes(u.protocol)) return false;
+      if (u.origin === this.configuredOrigin) return true;
+      return this.configuredOrigin === ICLOUD_CONTACTS_ORIGIN
+        && u.protocol === "https:" && u.port === ""
+        && ICLOUD_CONTACTS_PARTITION.test(u.hostname);
     } catch {
       return false;
     }
@@ -95,7 +88,7 @@ export class DavClient {
     let attempt = 0;
     let redirects = 0;
     if (!this.isTrustedUrl(current)) {
-      throw new DavError("server_error", `Refusing to send credentials to untrusted host ${safeHost(current)} (trusted: *.${this.trustedDomain})`);
+      throw new DavError("server_error", `Refusing to send credentials to untrusted host ${safeHost(current)}`);
     }
     // eslint-disable-next-line no-constant-condition
     while (true) {
@@ -142,7 +135,7 @@ export class DavClient {
         redirects++;
         const next = new URL(loc, current).toString();
         if (!this.isTrustedUrl(next)) {
-          throw new DavError("server_error", `Refusing to follow redirect to untrusted host ${safeHost(next)} (trusted: *.${this.trustedDomain})`);
+          throw new DavError("server_error", `Refusing to follow redirect to untrusted host ${safeHost(next)}`);
         }
         current = next;
         continue;
@@ -218,8 +211,8 @@ export class DavClient {
   }
 
   /**
-   * Authenticated binary GET (photos). Credentials are sent only to trusted
-   * hosts and redirects are never followed; untrusted URLs return undefined.
+   * Authenticated binary GET (photos). Credentials are sent only to allowed
+   * origins and redirects are never followed; untrusted URLs return undefined.
    */
   async getBinary(url: string, maxBytes = 5 * 1024 * 1024): Promise<{ data: Buffer; contentType?: string } | undefined> {
     if (!this.isTrustedUrl(url)) return undefined;

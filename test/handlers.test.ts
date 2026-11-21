@@ -95,7 +95,7 @@ describe("handlers against fake iCloud CardDAV", () => {
     await expect(handleUpdate(ctx, { id: created.contact.id, expectedEtag: upd.contact.etag! })).rejects.toMatchObject({ code: "invalid_input" });
 
     const del = await handleDelete(ctx, { id: created.contact.id, expectedEtag: upd.contact.etag! });
-    expect(del).toMatchObject({ deleted: true, fullName: "Dana Diaz" });
+    expect(del).toEqual({ deleted: true, id: created.contact.id });
     await expect(handleGet(ctx, { id: created.contact.id })).rejects.toMatchObject({ code: "not_found" });
   });
 

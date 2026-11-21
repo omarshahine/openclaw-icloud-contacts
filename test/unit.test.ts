@@ -302,11 +302,8 @@ describe("sanitize + config", () => {
 });
 
 describe("credential trust boundary", () => {
-  it("only sends credentials to the server's domain, refuses foreign redirects and photo hosts", async () => {
-    const { DavClient, baseDomain } = await import("../src/dav/client.js");
-    expect(baseDomain("p42-contacts.icloud.com")).toBe("icloud.com");
-    expect(baseDomain("contacts.icloud.com.cn")).toBe("icloud.com.cn");
-    expect(baseDomain("localhost")).toBe("localhost");
+  it("allows iCloud Contacts discovery but refuses other origins and photo hosts", async () => {
+    const { DavClient } = await import("../src/dav/client.js");
     const seen: string[] = [];
     const client = new DavClient({
       serverUrl: "https://contacts.icloud.com",
@@ -319,7 +316,9 @@ describe("credential trust boundary", () => {
         return new Response("should not be reached", { status: 200 });
       },
     });
-    expect(client.isTrustedUrl("https://p99-contacts.icloud.com/x")).toBe(true);
+    expect(client.isTrustedUrl("https://p99-contacts.icloud.com:443/x")).toBe(true);
+    expect(client.isTrustedUrl("https://p99-contacts.icloud.com:8443/x")).toBe(false);
+    expect(client.isTrustedUrl("https://www.icloud.com/x")).toBe(false);
     expect(client.isTrustedUrl("https://icloud.com.evil.example/x")).toBe(false);
     expect(client.isTrustedUrl("http://p42-contacts.icloud.com/x")).toBe(false);
     await expect(client.request("GET", "https://contacts.icloud.com/")).rejects.toThrow(/untrusted host evil.example.net/);
@@ -327,6 +326,26 @@ describe("credential trust boundary", () => {
     expect(await client.getBinary("https://evil.example.net/photo.jpg")).toBeUndefined();
     expect(seen.some((u) => u.includes("evil.example.net"))).toBe(false);
     expect((await client.request("GET", "https://p42-contacts.icloud.com/ok")).text).toBe("ok");
+  });
+
+  it("limits a custom server and its authenticated photos to the configured origin", async () => {
+    const { DavClient } = await import("../src/dav/client.js");
+    const calls: { url: string; auth: boolean }[] = [];
+    const client = new DavClient({
+      serverUrl: "https://dav.example.test:8443/addressbook",
+      username: "fixture",
+      password: "fixture",
+      fetch: async (url, init) => {
+        calls.push({ url, auth: new Headers(init.headers).has("Authorization") });
+        return new Response("fixture", { status: 200, headers: { "Content-Type": "image/jpeg" } });
+      },
+    });
+    expect(await client.getBinary("https://dav.example.test:8443/photo.jpg")).toMatchObject({ contentType: "image/jpeg" });
+    for (const origin of ["https://photo.example.test:8443", "https://dav.example.test", "https://contacts.icloud.com"]) {
+      expect(await client.getBinary(origin + "/photo.jpg")).toBeUndefined();
+      await expect(client.request("GET", origin + "/card")).rejects.toThrow(/untrusted host/);
+    }
+    expect(calls).toEqual([{ url: "https://dav.example.test:8443/photo.jpg", auth: true }]);
   });
 });
 
