@@ -227,6 +227,10 @@ describe("contact mapping", () => {
     const existing = parseContact(original, { readOnly: false });
     const updated = patchContact(original, existing, { organization: "New Org" });
     expect(parseContact(updated, { readOnly: false }).fullName).toBe("New Org");
+    const padded = buildNewContact({ organization: "Old Org " }, "ORG-2");
+    const paddedContact = parseContact(padded, { readOnly: false });
+    const paddedUpdate = patchContact(padded, paddedContact, { organization: "New Org" });
+    expect(parseContact(paddedUpdate, { readOnly: false }).fullName).toBe("New Org");
     const custom = original.replace("FN:Old Org", "FN:Custom Org");
     const kept = patchContact(custom, parseContact(custom, { readOnly: false }), { organization: "New Org" });
     expect(parseContact(kept, { readOnly: false }).fullName).toBe("Custom Org");

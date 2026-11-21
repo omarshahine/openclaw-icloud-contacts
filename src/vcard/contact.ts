@@ -489,7 +489,7 @@ function applyName(card: VCard, input: ContactInput, existing?: Contact): void {
   const fnParts = [prefix, given, middle, family, suffix].filter(Boolean).join(" ").trim();
   // Names stored in FN may intentionally differ from the structured fields.
   const organizationNameChanged = changes("organization") && !!org && !fnParts &&
-    (!cur.fullName || cur.fullName === cur.organization);
+    (!cur.fullName || cur.fullName.trim() === cur.organization?.trim());
   if (!existing || nameChanged || organizationNameChanged) {
     const fn = fnParts || org || cur.fullName || "";
     if (!fn) throw invalidInput("A name (givenName/familyName) or organization is required");
