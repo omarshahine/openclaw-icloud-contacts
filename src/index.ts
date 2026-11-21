@@ -48,7 +48,8 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
 
     let ctx: Context | null = null;
     let configError: string | null = null;
-    let readOnlyFromConfig = raw?.readOnly === true;
+    const scopedFromConfig = Array.isArray(raw?.groups) && raw.groups.some((name) => typeof name === "string" && name.trim());
+    const readOnlyFromConfig = raw?.readOnly === true;
 
     async function getContext(): Promise<Context> {
       if (ctx) return ctx;
@@ -61,10 +62,9 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
         log?.warn?.(`icloud-contacts: not configured: ${configError}`);
         throw e;
       }
-      readOnlyFromConfig = config.readOnly;
       const client = new DavClient({ serverUrl: config.serverUrl, username: config.appleId, password: config.appPassword });
       ctx = createContext(new Session(client), config);
-      log?.info?.(`icloud-contacts: connected as ${config.appleId}${config.readOnly ? " (read-only)" : ""}`);
+      log?.info?.(`icloud-contacts: connected as ${config.appleId}${config.readOnly || config.groups.length ? " (read-only)" : ""}`);
       return ctx;
     }
 
@@ -119,16 +119,20 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
     api.registerTool({
       name: "icloud_contacts_groups",
       label: "iCloud Contacts Groups",
-      description: "Work with iCloud contact groups: list groups, list a group's members, create a group, add/remove contacts to/from a group, delete a group. Group mutations are unavailable when the plugin is read-only.",
+      description: "Work with iCloud contact groups: list groups, list a group's members, create a group, add/remove contacts to/from a group, delete a group. Group mutations are unavailable when the plugin is read-only or group-scoped.",
       parameters: groupsSchema,
       async execute(_id: string, params: Record<string, unknown>) {
         try {
           const c = await getContext();
           const p = params as GroupsParams;
-          if (readOnlyFromConfig && p.action !== "list" && p.action !== "members") throw new DavError("read_only", "This plugin is configured readOnly");
           const res = await handleGroups(c, p);
           const r = res as Record<string, unknown>;
-          const marked = Array.isArray(r.groups) ? { ...r, groups: (r.groups as object[]).map(markGroup) } : Array.isArray(r.contacts) ? { ...r, contacts: (r.contacts as object[]).map(markContact) } : r;
+          const marked = {
+            ...r,
+            ...(Array.isArray(r.groups) ? { groups: (r.groups as object[]).map(markGroup) } : {}),
+            ...(Array.isArray(r.contacts) ? { contacts: (r.contacts as object[]).map(markContact) } : {}),
+            ...(r.group && typeof r.group === "object" ? { group: markGroup(r.group) } : {}),
+          };
           return ok({ preamble: datamarkingPreamble(), ...marked }, { action: `groups:${p.action}` });
         } catch (e) {
           return fail(e, "groups");
@@ -136,7 +140,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
       },
     });
 
-    if (readOnlyFromConfig) log?.info?.("icloud-contacts: readOnly=true, write tools not registered");
+    if (readOnlyFromConfig || scopedFromConfig) log?.info?.("icloud-contacts: read-only access, write tools not registered");
     else {
       api.registerTool({
         name: "icloud_contacts_create",

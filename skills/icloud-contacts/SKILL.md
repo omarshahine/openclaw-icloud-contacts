@@ -36,6 +36,7 @@ Write tools are absent when the plugin is configured read-only.
 
 ## Result shapes
 
+- A configured group allowlist makes the plugin read-only. It only returns allowed groups and their current members.
 - `search`/`list` return **brief** records: `id, fullName, givenName, familyName, organization, emails[], phones[], birthday, groups[]`. Pass `fields: "full"` for complete records.
 - `get`/`create`/`update` return the **full** record with labeled entries: `emails: [{label, value}]`,
   `phones`, `urls`, `addresses: [{label, street, city, state, postalCode, country, countryCode}]`,

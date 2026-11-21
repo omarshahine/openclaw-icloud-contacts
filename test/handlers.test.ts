@@ -191,6 +191,65 @@ describe("handlers against fake iCloud CardDAV", () => {
     expect((await handleGet(ro, { id: "UID-A" })).readOnly).toBe(true);
   });
 
+  it("scopes contact results, counts, and group labels to verified groups", async () => {
+    fake.seed("G2.vcf", groupCard("GRP-2", "Other", ["UID-A", "UID-B"]));
+    const scoped = makeCtx(fake, { groups: ["Friends"] });
+    const list = await handleList(scoped, {});
+    expect(list).toMatchObject({ totalContacts: 2, groups: 1 });
+    expect(list).not.toHaveProperty("addressbook");
+    expect(list.contacts.map((c) => [c.id, c.groups])).toEqual([["UID-B", ["Friends"]], ["UID-C", ["Friends"]]]);
+    expect(await handleGet(scoped, { id: "UID-B" })).toMatchObject({ readOnly: true, groups: ["Friends"] });
+    expect((await handleSearch(scoped, { query: "Bob", group: "GRP-1" })).contacts).toHaveLength(1);
+    expect(await handleGroups(scoped, { action: "list" })).toEqual({
+      count: 1, groups: [{ id: "GRP-1", name: "Friends", memberCount: 2 }],
+    });
+    expect(await handleGroups(scoped, { action: "members", group: "GRP-1" })).toMatchObject({
+      group: { id: "GRP-1", name: "Friends" }, matched: 2,
+    });
+  });
+
+  it("denies all scoped mutations before contacting CardDAV", async () => {
+    const scoped = makeCtx(fake, { groups: ["Friends"] });
+    await expect(handleCreate(scoped, { givenName: "New" })).rejects.toMatchObject({ code: "read_only" });
+    await expect(handleUpdate(scoped, { id: "UID-B", nickname: "B" })).rejects.toMatchObject({ code: "read_only" });
+    await expect(handleDelete(scoped, { id: "UID-B" })).rejects.toMatchObject({ code: "read_only" });
+    for (const action of ["create", "add", "remove", "delete"] as const) {
+      await expect(handleGroups(scoped, { action, group: "Friends", name: "New", contactIds: ["UID-B"] }))
+        .rejects.toMatchObject({ code: "read_only" });
+    }
+    expect(fake.log).toHaveLength(0);
+  });
+
+  it("requires a complete snapshot rather than serving a previously successful scoped read", async () => {
+    let incomplete = false;
+    const scopedConfig = { ...ctx.config, groups: ["Friends"] };
+    const client = new DavClient({
+      serverUrl: scopedConfig.serverUrl, username: fake.username, password: fake.password,
+      fetch: async (input, init) => {
+        if (incomplete && String(init?.body).includes("addressbook-multiget")) {
+          return new Response('<D:multistatus xmlns:D="DAV:"/>', { status: 207 });
+        }
+        return fake.fetch(input, init);
+      },
+    });
+    const scoped = createContext(new Session(client), scopedConfig);
+    expect((await handleList(scoped, {})).matched).toBe(2);
+    incomplete = true;
+    await expect(handleList(scoped, {})).rejects.toMatchObject({ code: "server_error" });
+    incomplete = false;
+    fake.seed("G1.vcf", groupCard("GRP-1", "Friends", ["UID-C"]));
+    expect((await handleList(scoped, {})).contacts.map((c) => c.id)).toEqual(["UID-C"]);
+  });
+
+  it("refuses to guess when a configured group name is ambiguous or its identity changes", async () => {
+    const scoped = makeCtx(fake, { groups: ["Friends"] });
+    await handleList(scoped, {});
+    fake.seed("G2.vcf", groupCard("GRP-2", "FRIENDS", ["UID-C"]));
+    await expect(handleList(scoped, {})).rejects.toMatchObject({ code: "not_configured" });
+    fake.seed("G1.vcf", groupCard("GRP-1", "Renamed", ["UID-B", "UID-C"]));
+    await expect(handleList(scoped, {})).rejects.toMatchObject({ code: "not_configured" });
+  });
+
   it("picks up server-side changes and deletions via sync deltas, and survives an expired token", async () => {
     await handleList(ctx, {});
     fake.seed("D.vcf", vcard({ uid: "UID-D", given: "Dee", family: "Delta" }));

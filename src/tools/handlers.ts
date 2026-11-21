@@ -14,10 +14,13 @@ export interface Context {
   session: Session;
   store: ContactStore;
   config: ResolvedConfig;
+  groupIds?: Map<string, string>;
+  allowedGroups?: GroupCard[];
+  scopedMembership?: Map<string, string[]>;
 }
 
 export function createContext(session: Session, config: ResolvedConfig): Context {
-  return { session, config, store: new ContactStore(session, { readOnly: config.readOnly, maxContacts: config.maxContacts }) };
+  return { session, config, groupIds: config.groups.length ? new Map() : undefined, store: new ContactStore(session, { readOnly: config.readOnly, maxContacts: config.maxContacts }) };
 }
 
 /** Drop null-valued keys (models often send null for unused optional fields). */
@@ -38,29 +41,70 @@ async function ensure(ctx: Context, force = false): Promise<void> {
   }
 }
 
+/** Scoped operations never fall back to an older address book after a failed read. */
+async function forRead(ctx: Context): Promise<Context> {
+  if (!ctx.config.groups.length) {
+    await ensure(ctx);
+    return ctx;
+  }
+  const store = new ContactStore(ctx.session, { readOnly: true, maxContacts: ctx.config.maxContacts, strictSnapshot: true });
+  const scoped = { ...ctx, store };
+  await ensure(scoped);
+  const all = store.groups();
+  const names = new Set(ctx.config.groups.map((name) => name.trim().toLowerCase()));
+  const allowedGroups: GroupCard[] = [];
+  for (const name of names) {
+    const matches = all.filter((g) => g.name.trim().toLowerCase() === name);
+    const pinnedId = ctx.groupIds?.get(name);
+    if (matches.length !== 1 || (pinnedId !== undefined && pinnedId !== matches[0].id)) {
+      throw new DavError("not_configured", "A configured Contacts group is missing, ambiguous, or no longer has its original identity. Review the group allowlist.");
+    }
+    allowedGroups.push(matches[0]);
+  }
+  // Pin only after all configured names have been resolved successfully.
+  for (const group of allowedGroups) ctx.groupIds?.set(group.name.trim().toLowerCase(), group.id);
+  const scopedMembership = new Map<string, string[]>();
+  for (const group of allowedGroups) {
+    for (const id of new Set(group.memberIds)) {
+      const groups = scopedMembership.get(id) ?? [];
+      groups.push(group.name);
+      scopedMembership.set(id, groups);
+    }
+  }
+  return { ...scoped, allowedGroups, scopedMembership };
+}
+
+function allowedGroups(ctx: Context): GroupCard[] {
+  return ctx.allowedGroups ?? ctx.store.groups();
+}
+
 function resolveGroup(ctx: Context, nameOrId: string): GroupCard {
   const needle = nameOrId.trim().toLowerCase();
-  const groups = ctx.store.groups();
+  const groups = allowedGroups(ctx);
+  if (ctx.allowedGroups) {
+    const matches = groups.filter((g) => g.id.toLowerCase() === needle || g.name.trim().toLowerCase() === needle);
+    if (matches.length !== 1) throw notFound("No unique matching group in the allowed groups");
+    return matches[0];
+  }
   const g = groups.find((x) => x.id.toLowerCase() === needle) ?? groups.find((x) => x.name.toLowerCase() === needle);
   if (!g) throw notFound(`Group "${nameOrId}" not found. Available: ${groups.map((x) => x.name).join(", ") || "none"}`);
   return g;
 }
 
-/** Contacts visible under the config allowlist and optional group filter, decorated with group names. */
-function visibleContacts(ctx: Context, groupFilter?: string | null): Contact[] {
-  const idx = ctx.store.groupIndex();
-  let entries = ctx.store.contacts();
-  const allow = ctx.config.groups.map((g) => g.toLowerCase());
-  if (allow.length) entries = entries.filter((e) => (idx.get(e.contact!.id) ?? []).some((n) => allow.includes(n.toLowerCase())));
-  if (groupFilter) {
-    const g = resolveGroup(ctx, groupFilter);
-    const members = new Set(g.memberIds);
-    entries = entries.filter((e) => members.has(e.contact!.id));
-  }
-  return entries.map((e) => {
-    const c = e.contact!;
+function groupsForContact(ctx: Context, id: string): string[] | undefined {
+  return (ctx.scopedMembership ?? ctx.store.groupIndex()).get(id);
+}
+
+/** Contacts visible under the config allowlist and optional group filter. */
+function visibleContacts(ctx: Context, group?: GroupCard): Contact[] {
+  const idx = ctx.scopedMembership ?? ctx.store.groupIndex();
+  const members = group ? new Set(group.memberIds) : undefined;
+  return ctx.store.contacts().flatMap(({ contact }) => {
+    const c = contact!;
+    if (members && !members.has(c.id)) return [];
     const groups = idx.get(c.id);
-    return groups?.length ? { ...c, groups } : c;
+    if (ctx.allowedGroups && !groups?.length) return [];
+    return [groups?.length ? { ...c, groups } : c];
   });
 }
 
@@ -70,6 +114,7 @@ function shape(c: Contact, fields: "brief" | "full" | null | undefined): Contact
 
 function summary(ctx: Context) {
   const book = ctx.store.addressbook;
+  if (ctx.scopedMembership) return { totalContacts: ctx.store.contacts().filter((e) => ctx.scopedMembership!.has(e.contact!.id)).length, groups: ctx.allowedGroups!.length };
   return { addressbook: book?.name ?? "card", totalContacts: ctx.store.contacts().length, groups: ctx.store.groups().length, ...(ctx.store.parseErrorCount() ? { unparseableCards: ctx.store.parseErrorCount() } : {}) };
 }
 
@@ -84,8 +129,8 @@ export interface ListParams {
 
 export async function handleList(ctx: Context, raw: ListParams) {
   const p = stripNulls(raw);
-  await ensure(ctx);
-  const all = visibleContacts(ctx, p.group).sort(sortByName);
+  ctx = await forRead(ctx);
+  const all = visibleContacts(ctx, p.group ? resolveGroup(ctx, p.group) : undefined).sort(sortByName);
   const offset = p.offset ?? 0;
   const limit = p.limit ?? ctx.config.defaultLimit;
   const page = all.slice(offset, offset + limit);
@@ -103,9 +148,9 @@ export interface SearchParams {
 export async function handleSearch(ctx: Context, raw: SearchParams) {
   const p = stripNulls(raw);
   if (!p.query || !p.query.trim()) throw invalidInput("query is required");
-  await ensure(ctx);
+  ctx = await forRead(ctx);
   const field = p.field ?? "any";
-  const hits = visibleContacts(ctx, p.group)
+  const hits = visibleContacts(ctx, p.group ? resolveGroup(ctx, p.group) : undefined)
     .filter((c) => matchesContact(c, p.query, field))
     .sort((a, b) => scoreContact(a, p.query) - scoreContact(b, p.query) || sortByName(a, b));
   const limit = p.limit ?? ctx.config.defaultLimit;
@@ -114,26 +159,23 @@ export async function handleSearch(ctx: Context, raw: SearchParams) {
 
 async function locate(ctx: Context, id: string): Promise<Entry> {
   if (!id || !id.trim()) throw invalidInput("id is required");
-  await ensure(ctx);
+  if (!ctx.allowedGroups) await ensure(ctx);
   let e = ctx.store.byUid(id.trim());
-  if (!e) {
+  if (!e && !ctx.allowedGroups) {
     // Maybe created elsewhere seconds ago; force one refresh.
     await ensure(ctx, true);
     e = ctx.store.byUid(id.trim());
   }
-  if (!e || !e.contact) throw notFound(`No contact with id "${id}"`);
-  const allow = ctx.config.groups.map((g) => g.toLowerCase());
-  if (allow.length) {
-    const groups = ctx.store.groupIndex().get(e.contact.id) ?? [];
-    if (!groups.some((n) => allow.includes(n.toLowerCase()))) throw notFound(`No contact with id "${id}" in the allowed groups`);
-  }
+  if (ctx.allowedGroups && (!e?.contact || !groupsForContact(ctx, e.contact.id)?.length)) throw notFound("No matching contact in the allowed groups");
+  if (!e?.contact) throw notFound(`No contact with id "${id}"`);
   return e;
 }
 
 export async function handleGet(ctx: Context, params: { id: string; includePhoto?: boolean | null }): Promise<Contact> {
+  if (ctx.config.groups.length) ctx = await forRead(ctx);
   const e = await locate(ctx, params.id);
   let c: Contact = { ...e.contact! };
-  const groups = ctx.store.groupIndex().get(c.id);
+  const groups = groupsForContact(ctx, c.id);
   if (groups?.length) c.groups = groups;
   if (params.includePhoto) {
     if (c.photoUrl) {
@@ -150,8 +192,13 @@ export async function handleGet(ctx: Context, params: { id: string; includePhoto
   return c;
 }
 
-function assertWritable(ctx: Context): void {
+function assertWriteEnabled(ctx: Context): void {
+  if (ctx.config.groups.length) throw new DavError("read_only", "Group-scoped Contacts access is read-only. CardDAV cannot enforce group membership and a contact write atomically.");
   if (ctx.config.readOnly) throw new DavError("read_only", "This plugin is configured readOnly");
+}
+
+function assertWritable(ctx: Context): void {
+  assertWriteEnabled(ctx);
   const book = ctx.store.addressbook;
   if (book?.readOnly) throw new DavError("read_only", `Address book "${book.name}" is read-only`);
 }
@@ -168,6 +215,7 @@ function normaliseInput(raw: ContactInput & Record<string, unknown>): ContactInp
 }
 
 export async function handleCreate(ctx: Context, raw: ContactInput): Promise<{ contact: Contact }> {
+  assertWriteEnabled(ctx);
   await ensure(ctx);
   assertWritable(ctx);
   const input = normaliseInput(raw as ContactInput & Record<string, unknown>);
@@ -203,6 +251,7 @@ async function writeExistingContact(ctx: Context, write: () => Promise<unknown>)
 }
 
 export async function handleUpdate(ctx: Context, raw: { id: string } & ContactInput): Promise<{ contact: Contact }> {
+  assertWriteEnabled(ctx);
   const { id, ...rest } = raw;
   const input = normaliseInput(rest as ContactInput & Record<string, unknown>);
   if (Object.keys(input).length === 0) throw invalidInput("Nothing to update: provide at least one field");
@@ -228,6 +277,7 @@ export async function handleUpdate(ctx: Context, raw: { id: string } & ContactIn
 }
 
 export async function handleDelete(ctx: Context, params: { id: string }): Promise<{ deleted: true; id: string; fullName: string }> {
+  assertWriteEnabled(ctx);
   const e = await locate(ctx, params.id);
   assertWritable(ctx);
   const etag = requireContactVersion(e);
@@ -252,16 +302,20 @@ export interface GroupsParams {
 
 export async function handleGroups(ctx: Context, raw: GroupsParams) {
   const p = stripNulls(raw);
-  await ensure(ctx);
+  if (p.action === "list" || p.action === "members") ctx = await forRead(ctx);
+  else {
+    assertWriteEnabled(ctx);
+    await ensure(ctx);
+  }
   switch (p.action) {
     case "list": {
-      const groups = ctx.store.groups().sort((a, b) => a.name.localeCompare(b.name));
+      const groups = allowedGroups(ctx).sort((a, b) => a.name.localeCompare(b.name));
       return { count: groups.length, groups: groups.map((g) => ({ id: g.id, name: g.name, memberCount: g.memberIds.length })) };
     }
     case "members": {
       if (!p.group) throw invalidInput("group is required for members");
       const g = resolveGroup(ctx, p.group);
-      const members = visibleContacts(ctx, g.name).sort(sortByName);
+      const members = visibleContacts(ctx, g).sort(sortByName);
       const limit = p.limit ?? ctx.config.defaultLimit;
       return { group: { id: g.id, name: g.name }, matched: members.length, count: Math.min(members.length, limit), truncated: members.length > limit, contacts: members.slice(0, limit).map(toBrief) };
     }

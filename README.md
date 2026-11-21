@@ -66,7 +66,7 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
 | `appPassword` | string / `${ENV}` / SecretRef | | App-specific password. Required. Never your Apple Account password. |
 | `serverUrl` | string | `https://contacts.icloud.com` | Must be `https`. |
 | `readOnly` | boolean | `false` | No writes; create/update/delete not registered. |
-| `groups` | string[] | all | Allowlist: only members of these groups are visible or editable. |
+| `groups` | string[] | all | Read-only allowlist: only these groups and their current members are visible. |
 | `defaultLimit` | integer | 25 | Default page size for list/search. |
 | `maxContacts` | integer | 10000 | Refuse to sync larger address books. |
 
@@ -99,7 +99,16 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
 
 An address book is more sensitive than a calendar. Defaults are conservative: brief shape, small
 limits, no photos unless asked. For shared or family gateways use `groups` to expose only a slice,
-or `readOnly` to prevent edits. Consider a dedicated agent with only the read tools allowed.
+or `readOnly` to prevent edits without filtering. With `groups` set, the plugin disables
+contact and group writes: CardDAV cannot atomically authorize a write against a separate group card.
+Every scoped read checks a fresh complete address-book snapshot, without exposing other groups or
+their counts. Each configured name must identify one group; its identity is pinned for the process
+lifetime. If a group is renamed, replaced, missing, or ambiguous, review the allowlist before
+restarting the gateway. Unscoped access keeps the normal cache and write behavior.
+
+The group filter applies to plugin tool results, not the underlying credential. The plugin fetches
+the full address book into memory to evaluate membership. Use a separate address book/account if
+you need isolation from the gateway itself.
 
 ## Development
 
