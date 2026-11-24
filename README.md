@@ -82,7 +82,10 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
   `_$!<Home>!$_` sentinels; standard labels map to TYPE params, custom labels round-trip as text.
   Unknown properties are preserved on update.
 - **Photos** are external URIs on iCloud; `photoUrl` is always returned, `includePhoto=true` fetches
-  it (authenticated) and returns base64. Photos larger than 5 MB are not returned.
+  it (authenticated) and returns base64. Photos larger than 5 MiB are not returned.
+- **Response limits:** Each CardDAV fetch attempt, including reading its response, has a
+  30-second deadline. Text responses are limited to 32 MiB per response. Oversized or
+  incomplete responses fail without returning partial data.
 - **Credential hygiene.** Credentials are sent only to the configured server origin (scheme, host,
   and port). Default iCloud discovery also allows Apple's numbered Contacts partition hosts over
   HTTPS on port 443. Redirects and photos outside those origins are not fetched.

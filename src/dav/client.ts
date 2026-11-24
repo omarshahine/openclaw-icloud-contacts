@@ -33,6 +33,7 @@ export interface DavResponse {
 }
 
 const MAX_REDIRECTS = 5;
+const MAX_TEXT_BYTES = 32 * 1024 * 1024;
 
 const ICLOUD_CONTACTS_ORIGIN = "https://contacts.icloud.com";
 const ICLOUD_CONTACTS_PARTITION = /^p[0-9]+-contacts\.icloud\.com$/;
@@ -100,10 +101,10 @@ export class DavClient {
         ...(opts.body !== undefined ? { "Content-Type": "application/xml; charset=utf-8" } : {}),
         ...(opts.headers ?? {}),
       };
-      let res: Response;
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), this.timeoutMs);
       try {
-        const ac = new AbortController();
-        const timer = setTimeout(() => ac.abort(), this.timeoutMs);
+        let res: Response;
         try {
           res = await this.fetchImpl(current, {
             method,
@@ -112,55 +113,61 @@ export class DavClient {
             redirect: "manual",
             signal: ac.signal,
           });
-        } finally {
-          clearTimeout(timer);
+        } catch (e) {
+          if (!readOnly) throw new DavError("write_unconfirmed", "The server did not confirm the write. Check the stored record before attempting it again.");
+          if (attempt === 0) {
+            attempt++;
+            clearTimeout(timer);
+            await sleep(500);
+            continue;
+          }
+          throw new DavError("server_error", `Network error talking to CardDAV server: ${describe(e)}`);
         }
-      } catch (e) {
-        if (!readOnly) throw new DavError("write_unconfirmed", "The server did not confirm the write. Check the stored record before attempting it again.");
-        if (attempt === 0) {
+
+        // Redirects, failures and writes are decided from status/headers. Never
+        // wait for the body before applying the read-retry or no-write-replay rules.
+        if (!readOnly || res.status >= 300) discardBody(res);
+        if (res.status >= 300 && res.status < 400) {
+          if (!readOnly) throw new DavError("write_unconfirmed", "Received a redirect while writing. Check the stored record before attempting it again.", res.status);
+          const loc = res.headers.get("location");
+          if (!loc || redirects >= MAX_REDIRECTS) {
+            throw new DavError("server_error", `Too many redirects or missing Location (status ${res.status})`, res.status);
+          }
+          redirects++;
+          const next = new URL(loc, current).toString();
+          if (!this.isTrustedUrl(next)) {
+            throw new DavError("server_error", `Refusing to follow redirect to untrusted host ${safeHost(next)}`);
+          }
+          current = next;
+          continue;
+        }
+
+        if (res.status >= 500 && !readOnly) {
+          throw new DavError("write_unconfirmed", "The server returned an error while writing. Check the stored record before attempting it again.", res.status);
+        }
+        if (res.status >= 500 && attempt === 0) {
           attempt++;
+          clearTimeout(timer);
           await sleep(500);
           continue;
         }
-        throw new DavError("server_error", `Network error talking to CardDAV server: ${describe(e)}`);
-      }
 
-      if (!readOnly && res.body) void res.body.cancel().catch(() => {});
-      if (res.status >= 300 && res.status < 400) {
-        if (!readOnly) throw new DavError("write_unconfirmed", "Received a redirect while writing. Check the stored record before attempting it again.", res.status);
-        const loc = res.headers.get("location");
-        if (!loc || redirects >= MAX_REDIRECTS) {
-          throw new DavError("server_error", `Too many redirects or missing Location (status ${res.status})`, res.status);
+        if (!readOnly && res.status === 202) {
+          throw new DavError("write_unconfirmed", "The server accepted the write for processing but did not confirm completion. Check the stored record before attempting it again.", res.status);
         }
-        redirects++;
-        const next = new URL(loc, current).toString();
-        if (!this.isTrustedUrl(next)) {
-          throw new DavError("server_error", `Refusing to follow redirect to untrusted host ${safeHost(next)}`);
-        }
-        current = next;
-        continue;
+        this.throwForStatus(res.status, method, current);
+        const text = readOnly
+          ? new TextDecoder().decode(await readBody(res, ac.signal, MAX_TEXT_BYTES,
+            new DavError("server_error", "CardDAV response exceeded the 32 MiB limit", res.status)))
+          : "";
+        return { status: res.status, headers: res.headers, text, url: current };
+      } finally {
+        clearTimeout(timer);
       }
-
-      if (res.status >= 500 && !readOnly) {
-        throw new DavError("write_unconfirmed", "The server returned an error while writing. Check the stored record before attempting it again.", res.status);
-      }
-      if (res.status >= 500 && attempt === 0) {
-        attempt++;
-        await sleep(500);
-        continue;
-      }
-
-      // Mutation outcomes depend on status and headers, not the response body.
-      if (!readOnly && res.status === 202) {
-        throw new DavError("write_unconfirmed", "The server accepted the write for processing but did not confirm completion. Check the stored record before attempting it again.", res.status);
-      }
-      const text = readOnly ? await res.text() : "";
-      this.throwForStatus(res.status, method, current, text);
-      return { status: res.status, headers: res.headers, text, url: current };
     }
   }
 
-  private throwForStatus(status: number, method: string, url: string, body: string): void {
+  private throwForStatus(status: number, method: string, url: string): void {
     if (status < 400) return;
     const path = safePath(url);
     switch (status) {
@@ -180,7 +187,7 @@ export class DavClient {
       default:
         throw new DavError(
           "server_error",
-          `${method} ${path}: HTTP ${status}${body ? " " + body.slice(0, 200).replace(/\s+/g, " ") : ""}`,
+          `${method} ${path}: HTTP ${status}`,
           status,
         );
     }
@@ -216,17 +223,72 @@ export class DavClient {
    */
   async getBinary(url: string, maxBytes = 5 * 1024 * 1024): Promise<{ data: Buffer; contentType?: string } | undefined> {
     if (!this.isTrustedUrl(url)) return undefined;
-    const res = await this.fetchImpl(url, { method: "GET", headers: { Authorization: this.authHeader, "User-Agent": this.userAgent, Accept: "image/*,*/*;q=0.5" }, redirect: "manual" });
-    if (!res.ok) return undefined;
-    const ab = await res.arrayBuffer();
-    if (ab.byteLength > maxBytes) throw new DavError("invalid_input", `Binary larger than ${Math.round(maxBytes / 1024 / 1024)} MB; not returned`);
-    return { data: Buffer.from(ab), contentType: res.headers.get("content-type")?.split(";")[0] ?? undefined };
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), this.timeoutMs);
+    try {
+      const res = await this.fetchImpl(url, { method: "GET", headers: { Authorization: this.authHeader, "User-Agent": this.userAgent, Accept: "image/*,*/*;q=0.5" }, redirect: "manual", signal: ac.signal });
+      if (!res.ok) {
+        discardBody(res);
+        return undefined;
+      }
+      const data = await readBody(res, ac.signal, maxBytes,
+        new DavError("invalid_input", `Binary larger than ${Math.round(maxBytes / 1024 / 1024)} MB; not returned`));
+      return { data, contentType: res.headers.get("content-type")?.split(";")[0] ?? undefined };
+    } catch (e) {
+      if (e instanceof DavError) throw e;
+      throw new DavError("server_error", ac.signal.aborted ? "CardDAV photo request timed out" : "CardDAV photo request failed");
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async delete(url: string, cond: { ifMatch?: string } = {}): Promise<void> {
     const headers: Record<string, string> = {};
     if (cond.ifMatch) headers["If-Match"] = cond.ifMatch;
     await this.request("DELETE", url, { headers });
+  }
+}
+
+function discardBody(response: Response): void {
+  void response.body?.cancel().catch(() => {});
+}
+
+async function readBody(response: Response, signal: AbortSignal, maxBytes: number, tooLarge: DavError): Promise<Buffer> {
+  if (!response.body) return Buffer.alloc(0);
+  const declared = response.headers.get("content-length");
+  if (declared !== null && /^\d+$/.test(declared) && Number(declared) > maxBytes) {
+    discardBody(response);
+    throw tooLarge;
+  }
+
+  const reader = response.body.getReader();
+  const cancel = () => { void reader.cancel().catch(() => {}); };
+  signal.addEventListener("abort", cancel, { once: true });
+  let data = Buffer.alloc(0);
+  let size = 0;
+  try {
+    signal.throwIfAborted();
+    for (;;) {
+      const { value, done } = await reader.read();
+      signal.throwIfAborted(); // A canceled read can resolve as done, not reject.
+      if (done) return data.subarray(0, size);
+      if (value.byteLength > maxBytes - size) throw tooLarge;
+      const end = size + value.byteLength;
+      if (end > data.byteLength) {
+        const grown = Buffer.allocUnsafe(Math.min(maxBytes, Math.max(16 * 1024, end, data.byteLength * 2)));
+        data.copy(grown, 0, 0, size);
+        data = grown;
+      }
+      data.set(value, size);
+      size = end;
+    }
+  } catch (e) {
+    cancel();
+    if (e === tooLarge) throw e;
+    throw new DavError("server_error", signal.aborted ? "CardDAV response body timed out" : "CardDAV response body could not be read", response.status);
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    reader.releaseLock();
   }
 }
 
