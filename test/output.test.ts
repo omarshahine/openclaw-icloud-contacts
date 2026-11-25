@@ -39,8 +39,25 @@ it("scopes photo outputs at the actual SDK entry and marks nested external text"
     expect(c.emails[0].value).toContain("hello@example.invalid");
     expect(c).not.toHaveProperty("photoUrl");
     expect(c).not.toHaveProperty("imageBase64");
+    expect(c).not.toHaveProperty("imageType");
   }
   expect(fake.log.some((r) => r.url === url)).toBe(false);
+});
+
+it("keeps usable photo formats and bytes intact at the unscoped SDK boundary", async () => {
+  const fake = new FakeICloud();
+  const url = fake.cardUrl + "wbs/fixture.jpg";
+  fake.photos.set(url, { data: Buffer.from("/9j/4A==", "base64"), contentType: "image/jpeg" });
+  fake.seed("ext.vcf", vcard({ uid: "External", given: "Fixture", extra: ["PHOTO;VALUE=uri:" + url] }));
+  fake.seed("inline.vcf", vcard({ uid: "Inline", given: "Fixture", extra: ["PHOTO;ENCODING=b;TYPE=JPEG:/9j/4A=="] }));
+  fake.seed("unknown.vcf", vcard({ uid: "Unknown", given: "Fixture", extra: ['PHOTO;ENCODING=b;TYPE="unknown format":/9j/4A=='] }));
+  vi.stubGlobal("fetch", fake.fetch);
+  const { execute } = register({ appleId: fake.username, appPassword: fake.password });
+
+  const get = async (id: string) => (await execute("get", { id, includePhoto: true })).contact;
+  expect(await get("External")).toMatchObject({ imageBase64: "/9j/4A==", imageType: "image/jpeg" });
+  expect(await get("Inline")).toMatchObject({ imageBase64: "/9j/4A==", imageType: "jpeg" });
+  expect((await get("Unknown")).imageType).toContain("UNTRUSTED_CONTACT_DATA_");
 });
 
 it("rejects unprepared credentials without using an ambient password or networking", async () => {

@@ -108,7 +108,7 @@ export const searchSchema = Type.Object(
 export const getSchema = Type.Object(
   {
     id: Type.String({ description: "Contact id (vCard UID) from list/search" }),
-    includePhoto: OptNull(Type.Boolean({ description: "Fetch the photo and include it as base64 (large). Default false; photoUrl is always returned when present." })),
+    includePhoto: OptNull(Type.Boolean({ description: "Include the photo as base64 (large) for unscoped access. Default false. Group-scoped access returns only photo presence, with no URL or photo bytes." })),
   },
   { additionalProperties: false },
 );

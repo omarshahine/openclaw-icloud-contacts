@@ -49,8 +49,14 @@ export function markUntrustedText(text: string, fieldName: string): string {
 
 const OPAQUE_FIELDS = new Set(["id", "etag", "imageBase64", "contactType", "lastModified"]);
 
+const IMAGE_TYPE = /^(?:image\/[a-z0-9][a-z0-9.+-]{0,63}|jpeg|jpg|png|gif|bmp|tiff|webp|heic|heif|avif|svg|ico)$/i;
+
 function markExternal(value: unknown, field: string): unknown {
-  if (typeof value === "string") return value ? markUntrustedText(value, field) : value;
+  if (typeof value === "string") {
+    // Preserve usable MIME types and legacy vCard format tokens, not arbitrary server text.
+    if (field === "contact.imageType" && IMAGE_TYPE.test(value) && value === value.trim()) return value;
+    return value ? markUntrustedText(value, field) : value;
+  }
   if (Array.isArray(value)) return value.map((item) => markExternal(item, field));
   if (value && typeof value === "object") {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [
