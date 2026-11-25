@@ -1,14 +1,14 @@
-import { beforeEach, describe, expect, it } from "vitest";
-import { DavClient } from "../src/dav/client.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { DavClient, type ClientOptions } from "../src/dav/client.js";
 import { Session } from "../src/dav/discovery.js";
 import { DavError } from "../src/errors.js";
 import type { ResolvedConfig } from "../src/config.js";
 import { createContext, handleCreate, handleDelete, handleGet, handleGroups, handleList, handleSearch, handleUpdate, type Context } from "../src/tools/handlers.js";
 import { FakeICloud, groupCard, vcard } from "./helpers/fake-icloud.js";
 
-function makeCtx(fake: FakeICloud, overrides: Partial<ResolvedConfig> = {}): Context {
+function makeCtx(fake: FakeICloud, overrides: Partial<ResolvedConfig> = {}, transport: Pick<ClientOptions, "fetch" | "timeoutMs"> = {}): Context {
   const config: ResolvedConfig = { appleId: fake.username, appPassword: fake.password, serverUrl: "https://contacts.icloud.com", readOnly: false, groups: [], defaultLimit: 25, maxContacts: 10_000, ...overrides };
-  const client = new DavClient({ serverUrl: config.serverUrl, username: config.appleId, password: config.appPassword, fetch: fake.fetch });
+  const client = new DavClient({ serverUrl: config.serverUrl, username: config.appleId, password: config.appPassword, fetch: fake.fetch, ...transport });
   const ctx = createContext(new Session(client), config);
   ctx.store.opts.minRefreshIntervalMs = 0; // tests want every call to sync
   return ctx;
@@ -73,6 +73,74 @@ describe("handlers against fake iCloud CardDAV", () => {
     expect(withPhoto.imageBase64).toBe(Buffer.from([0xff, 0xd8, 0xff, 0xe0]).toString("base64"));
     expect(withPhoto.imageType).toBe("image/jpeg");
     await expect(handleGet(ctx, { id: "NOPE" })).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("applies the request deadline while a contact listing body is still being read", async () => {
+    let started: (() => void) | undefined;
+    const reading = new Promise<void>((resolve) => { started = resolve; });
+    const cancel = vi.fn();
+    const fetch = vi.fn((url: string, init: RequestInit) => {
+      if (init.method !== "REPORT") return fake.fetch(url, init);
+      return Promise.resolve(new Response(new ReadableStream<Uint8Array>({
+        pull() { started?.(); },
+        cancel,
+      }, { highWaterMark: 0 }), { status: 207 }));
+    });
+    const limited = makeCtx(fake, {}, { fetch, timeoutMs: 100 });
+
+    vi.useFakeTimers();
+    try {
+      const result = expect(handleList(limited, {})).rejects.toMatchObject({
+        code: "server_error", message: "CardDAV response body timed out",
+      });
+      await reading;
+      await vi.advanceTimersByTimeAsync(100);
+      await result;
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(fetch.mock.calls.filter(([, init]) => init.method === "REPORT")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects an oversized listing from its headers before consuming the body", async () => {
+    const pull = vi.fn();
+    const cancel = vi.fn();
+    const fetch = (url: string, init: RequestInit) => {
+      if (init.method !== "REPORT") return fake.fetch(url, init);
+      return Promise.resolve(new Response(new ReadableStream<Uint8Array>({ pull, cancel }, { highWaterMark: 0 }), {
+        status: 207, headers: { "content-length": String(32 * 1024 * 1024 + 1) },
+      }));
+    };
+    await expect(handleList(makeCtx(fake, {}, { fetch }), {})).rejects.toMatchObject({
+      code: "server_error", message: "CardDAV response exceeded the 32 MiB limit",
+    });
+    expect(pull).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not return a photo beyond the streaming limit", async () => {
+    const url = `${fake.cardUrl}wbs/large.jpg`;
+    fake.seed("P.vcf", vcard({ uid: "UID-P", given: "Pat", family: "Photo", extra: [`PHOTO;VALUE=uri:${url}`] }));
+    const cancel = vi.fn();
+    let pulls = 0;
+    const fetch = vi.fn((input: string, init: RequestInit) => {
+      if (input !== url) return fake.fetch(input, init);
+      return Promise.resolve(new Response(new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new Uint8Array(++pulls === 1 ? 5 * 1024 * 1024 : 1));
+        },
+        cancel,
+      }, { highWaterMark: 0 }), { headers: { "content-type": "image/jpeg" } }));
+    });
+    const limited = makeCtx(fake, {}, { fetch });
+    await expect(handleGet(limited, { id: "UID-P", includePhoto: true })).rejects.toMatchObject({
+      code: "invalid_input", message: "Binary larger than 5 MB; not returned",
+    });
+    expect(pulls).toBe(2);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    await expect(handleGet(limited, { id: "UID-P" })).resolves.toMatchObject({ id: "UID-P", hasImage: true });
+    expect(fetch.mock.calls.filter(([input]) => input === url)).toHaveLength(1);
   });
 
   it("creates, updates with etag, and deletes", async () => {
