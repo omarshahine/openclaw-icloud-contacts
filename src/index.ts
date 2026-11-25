@@ -12,7 +12,7 @@ import { DavClient } from "./dav/client.js";
 import { Session } from "./dav/discovery.js";
 import { resolveConfig, type RawPluginConfig, type ResolvedConfig } from "./config.js";
 import { DavError } from "./errors.js";
-import { datamarkingPreamble, markContact, markGroup } from "./sanitize.js";
+import { datamarkingPreamble, markContact, markGroup, markUntrustedText } from "./sanitize.js";
 import { createContext, handleCreate, handleDelete, handleGet, handleGroups, handleList, handleSearch, handleUpdate, type Context } from "./tools/handlers.js";
 import { createSchema, deleteSchema, getSchema, groupsSchema, listSchema, searchSchema, updateSchema } from "./tools/schemas.js";
 
@@ -34,7 +34,7 @@ function ok(payload: unknown, details: Record<string, unknown> = {}): ToolResult
 function fail(e: unknown, action: string): ToolResult {
   const code = e instanceof DavError ? e.code : "server_error";
   const message = e instanceof Error ? e.message : String(e);
-  return { content: [{ type: "text", text: JSON.stringify({ success: false, error: { code, message } }, null, 2) }], details: { action, errorCode: code } };
+  return { content: [{ type: "text", text: JSON.stringify({ success: false, error: { code, message: markUntrustedText(message, "error") } }, null, 2) }], details: { action, errorCode: code } };
 }
 
 const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
@@ -64,20 +64,20 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
       }
       const client = new DavClient({ serverUrl: config.serverUrl, username: config.appleId, password: config.appPassword });
       ctx = createContext(new Session(client), config);
-      log?.info?.(`icloud-contacts: connected as ${config.appleId}${config.readOnly || config.groups.length ? " (read-only)" : ""}`);
+      log?.info?.(`icloud-contacts: configured${config.readOnly || config.groups.length ? " (read-only)" : ""}`);
       return ctx;
     }
 
     api.registerTool({
       name: "icloud_contacts_list",
       label: "iCloud Contacts List",
-      description: "List iCloud contacts (sorted by name) as brief records: id, name, organization, emails, phones, birthday, groups. Supports limit/offset paging and filtering to one group. Use icloud_contacts_search when looking for someone specific.",
+      description: "List iCloud contacts (sorted by name) as brief records: id, name, organization, emails, phones, birthday, groups. Supports limit/offset paging, filtering to one group and fields=full. Group-scoped access does not return photo URLs or data. Use icloud_contacts_search when looking for someone specific.",
       parameters: listSchema,
       async execute(_id: string, params: Record<string, unknown>) {
         try {
           const c = await getContext();
           const res = await handleList(c, params as ListParams);
-          return ok({ preamble: datamarkingPreamble(), ...res, contacts: res.contacts.map(markContact) }, { action: "list", count: res.count, truncated: res.truncated });
+          return ok({ preamble: datamarkingPreamble(), ...res, ...("addressbook" in res && res.addressbook ? { addressbook: markUntrustedText(res.addressbook, "addressbook") } : {}), contacts: res.contacts.map(markContact) }, { action: "list", count: res.count, truncated: res.truncated });
         } catch (e) {
           return fail(e, "list");
         }
@@ -87,7 +87,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
     api.registerTool({
       name: "icloud_contacts_search",
       label: "iCloud Contacts Search",
-      description: "Search iCloud contacts by name, email, phone (digits match any formatting), organization, or any of those. Returns brief records by default; pass fields=full for complete records.",
+      description: "Search iCloud contacts by name, email, phone (digits match any formatting), organization, or any of those. Returns brief records by default; pass fields=full for detailed records. Group-scoped access does not return photo URLs or data.",
       parameters: searchSchema,
       async execute(_id: string, params: Record<string, unknown>) {
         try {
@@ -103,7 +103,7 @@ const pluginEntry: OpenClawPluginDefinition = definePluginEntry({
     api.registerTool({
       name: "icloud_contacts_get",
       label: "iCloud Contacts Get",
-      description: "Get one iCloud contact by id with all fields (labeled emails/phones/addresses/urls, IM, relations, social profiles, dates, notes, groups, photoUrl). Set includePhoto=true to also return the photo as base64.",
+      description: "Get one iCloud contact by id with all fields (labeled emails/phones/addresses/urls, IM, relations, social profiles, dates, notes, groups, photoUrl). Set includePhoto=true to also return the photo as base64. Group-scoped access returns only photo presence and never fetches a photo.",
       parameters: getSchema,
       async execute(_id: string, params: Record<string, unknown>) {
         try {

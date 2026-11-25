@@ -75,6 +75,29 @@ describe("handlers against fake iCloud CardDAV", () => {
     await expect(handleGet(ctx, { id: "NOPE" })).rejects.toMatchObject({ code: "not_found" });
   });
 
+  it("exposes photo presence only in scoped full lists, searches and Gets, without fetching photo bytes", async () => {
+    const url = fake.cardUrl + "wbs/photo-a.jpg";
+    fake.seed("P.vcf", vcard({ uid: "UID-P", given: "Photo External", extra: ["PHOTO;VALUE=uri:" + url] }));
+    fake.seed("I.vcf", vcard({ uid: "UID-I", given: "Photo Inline", extra: ["PHOTO;ENCODING=b;TYPE=JPEG:/9j/4A=="] }));
+    fake.seed("G2.vcf", groupCard("GRP-2", "Photo Team", ["UID-P", "UID-I"]));
+    const scoped = makeCtx(fake, { groups: ["Photo Team"] });
+    const list = await handleList(scoped, { fields: "full" });
+    const search = await handleSearch(scoped, { query: "Photo", fields: "full" });
+    expect(list.contacts).toHaveLength(2);
+    expect(search.contacts).toHaveLength(2);
+    const inline = await handleGet(scoped, { id: "UID-I", includePhoto: true });
+    const external = await handleGet(scoped, { id: "UID-P", includePhoto: true });
+    for (const c of [...list.contacts, ...search.contacts, inline, external]) {
+      expect(c).toMatchObject({ hasImage: true, groups: ["Photo Team"] });
+      for (const field of ["photoUrl", "imageBase64", "imageType"]) expect(c).not.toHaveProperty(field);
+    }
+    for (const c of (await handleList(scoped, {})).contacts) expect(c).not.toHaveProperty("hasImage");
+    expect(fake.log.some((req) => req.url === url)).toBe(false);
+    expect((await handleGet(ctx, { id: "UID-I", includePhoto: true })).imageBase64).toBe("/9j/4A==");
+    expect((await handleGet(ctx, { id: "UID-P", includePhoto: true })).imageBase64).toBe("/9j/4A==");
+    expect(fake.log.filter((req) => req.url === url)).toHaveLength(1);
+  });
+
   it("applies the request deadline while a contact listing body is still being read", async () => {
     let started: (() => void) | undefined;
     const reading = new Promise<void>((resolve) => { started = resolve; });
