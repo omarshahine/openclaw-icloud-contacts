@@ -108,8 +108,14 @@ function visibleContacts(ctx: Context, group?: GroupCard): Contact[] {
   });
 }
 
-function shape(c: Contact, fields: "brief" | "full" | null | undefined): Contact | ContactBrief {
-  return fields === "full" ? c : toBrief(c);
+function fullContact(ctx: Context, c: Contact): Contact {
+  if (!ctx.config.groups.length) return c;
+  const { photoUrl: _url, imageBase64: _bytes, imageType: _type, ...visible } = c;
+  return visible;
+}
+
+function shape(ctx: Context, c: Contact, fields: "brief" | "full" | null | undefined): Contact | ContactBrief {
+  return fields === "full" ? fullContact(ctx, c) : toBrief(c);
 }
 
 function summary(ctx: Context) {
@@ -134,7 +140,7 @@ export async function handleList(ctx: Context, raw: ListParams) {
   const offset = p.offset ?? 0;
   const limit = p.limit ?? ctx.config.defaultLimit;
   const page = all.slice(offset, offset + limit);
-  return { ...summary(ctx), matched: all.length, offset, count: page.length, truncated: offset + page.length < all.length, contacts: page.map((c) => shape(c, p.fields)) };
+  return { ...summary(ctx), matched: all.length, offset, count: page.length, truncated: offset + page.length < all.length, contacts: page.map((c) => shape(ctx, c, p.fields)) };
 }
 
 export interface SearchParams {
@@ -154,7 +160,7 @@ export async function handleSearch(ctx: Context, raw: SearchParams) {
     .filter((c) => matchesContact(c, p.query, field))
     .sort((a, b) => scoreContact(a, p.query) - scoreContact(b, p.query) || sortByName(a, b));
   const limit = p.limit ?? ctx.config.defaultLimit;
-  return { query: p.query, field, matched: hits.length, count: Math.min(hits.length, limit), truncated: hits.length > limit, contacts: hits.slice(0, limit).map((c) => shape(c, p.fields)) };
+  return { query: p.query, field, matched: hits.length, count: Math.min(hits.length, limit), truncated: hits.length > limit, contacts: hits.slice(0, limit).map((c) => shape(ctx, c, p.fields)) };
 }
 
 async function locate(ctx: Context, id: string): Promise<Entry> {
@@ -177,6 +183,7 @@ export async function handleGet(ctx: Context, params: { id: string; includePhoto
   let c: Contact = { ...e.contact! };
   const groups = groupsForContact(ctx, c.id);
   if (groups?.length) c.groups = groups;
+  if (ctx.config.groups.length) return fullContact(ctx, c);
   if (params.includePhoto) {
     if (c.photoUrl) {
       const bin = await ctx.session.client.getBinary(c.photoUrl);

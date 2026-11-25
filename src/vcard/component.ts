@@ -5,6 +5,10 @@
  * prefixes so updates round-trip byte-for-byte for anything we do not model.
  */
 
+import { invalidInput } from "../errors.js";
+
+const originalProperties = new WeakMap<VProperty, { snapshot: string; raw: string }>();
+
 export interface VProperty {
   /** Apple/RFC group prefix without the dot, e.g. "item1"; undefined if none */
   group?: string;
@@ -59,7 +63,7 @@ export function parseContentLine(line: string): VProperty {
     group = parts[0].slice(0, dot);
     name = name.slice(dot + 1);
   }
-  const params: Record<string, string[]> = {};
+  const params: Record<string, string[]> = Object.create(null);
   for (const p of parts.slice(1)) {
     const eq = p.indexOf("=");
     // vCard 2.1-style bare params (e.g. ";CELL") -> TYPE
@@ -92,18 +96,27 @@ function splitParamValues(raw: string): string[] {
 
 /** Parse a single vCard document. Returns the first VCARD. */
 export function parseVCard(text: string): VCard {
-  const lines = unfold(text);
+  const lines: string[] = [];
+  for (const line of text.split(/\r\n|\r|\n/)) {
+    if (/^[ \t]/.test(line) && lines.length && lines[lines.length - 1]) {
+      lines[lines.length - 1] += "\r\n" + line;
+    } else lines.push(line);
+  }
   const props: VProperty[] = [];
   let inside = false;
   for (const line of lines) {
-    const p = parseContentLine(line);
+    if (!line) continue;
+    const p = parseContentLine(unfold(line).join(""));
     if (p.name === "BEGIN" && p.value.trim().toUpperCase() === "VCARD") {
       if (inside) break; // nested VCARD not supported; stop
       inside = true;
       continue;
     }
     if (p.name === "END" && p.value.trim().toUpperCase() === "VCARD") break;
-    if (inside) props.push(p);
+    if (inside) {
+      originalProperties.set(p, { snapshot: JSON.stringify(p), raw: line });
+      props.push(p);
+    }
   }
   if (!inside) throw new Error("Not a vCard (missing BEGIN:VCARD)");
   return { props };
@@ -132,12 +145,18 @@ export function fold(line: string): string {
 }
 
 function paramValueOut(v: string): string {
+  if (/[\x00-\x1f\x7f"]/.test(v)) throw invalidInput("vCard parameter contains a control character or quote");
   return /[;:,]/.test(v) ? `"${v}"` : v;
 }
 
 export function serializeProperty(p: VProperty): string {
+  const original = originalProperties.get(p);
+  if (/[\r\n\x00]/.test(p.value)) throw invalidInput("vCard value contains an unescaped line break or NUL");
+  if (original?.snapshot === JSON.stringify(p) && !original.raw.includes("\x00")) return original.raw;
+  if (!/^[a-z0-9-]+$/i.test(p.name) || (p.group && !/^[a-z0-9-]+$/i.test(p.group))) throw invalidInput("Invalid vCard property name");
   let line = (p.group ? `${p.group}.` : "") + p.name;
   for (const [k, vals] of Object.entries(p.params)) {
+    if (!/^[a-z0-9-]+$/i.test(k)) throw invalidInput("Invalid vCard parameter name");
     // Apple writes repeated type params (type=INTERNET;type=pref); keep that shape.
     for (const v of vals) line += `;${k.toLowerCase() === "type" ? "type" : k}=${paramValueOut(v)}`;
   }
@@ -149,7 +168,7 @@ export function serializeVCard(card: VCard): string {
   const lines = ["BEGIN:VCARD"];
   // VERSION must come first per RFC 2426; ensure it exists and leads.
   const version = card.props.find((p) => p.name === "VERSION");
-  lines.push(`VERSION:${version?.value ?? "3.0"}`);
+  lines.push(version ? serializeProperty(version) : "VERSION:3.0");
   for (const p of card.props) if (p.name !== "VERSION") lines.push(serializeProperty(p));
   lines.push("END:VCARD");
   return lines.join("\r\n") + "\r\n";
@@ -164,7 +183,7 @@ export function serializeVCard(card: VCard): string {
  * Apple's `_$!<Home>!$_` sentinel characters MUST NOT be escaped (RFC 6350 §3.4).
  */
 export function escapeText(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+  return s.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r\n|\r|\n/g, "\\n");
 }
 
 export function unescapeText(s: string): string {

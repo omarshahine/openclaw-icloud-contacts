@@ -34,7 +34,7 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
 2. Create an app-specific password at <https://account.apple.com> → Sign-In and Security →
    App-Specific Passwords. Copy the `xxxx-xxxx-xxxx-xxxx` value.
 3. Make it available to the gateway as an environment variable named `ICLOUD_APP_PASSWORD` (or store it
-   in `~/.openclaw/secrets.json` and reference it with a SecretRef, see below).
+   using an OpenClaw-managed secret provider, see below).
 4. Configure the plugin in `openclaw.json`:
 
    ```jsonc
@@ -53,9 +53,18 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
    }
    ```
 
-   `appPassword` also accepts a SecretRef (`{"source":"env","provider":"env","id":"ICLOUD_APP_PASSWORD"}`
-   or `{"source":"file","provider":"secrets","id":"/icloud/appPassword"}` into `~/.openclaw/secrets.json`).
-   Without config, `ICLOUD_APPLE_ID` and `ICLOUD_APP_PASSWORD` environment variables are used.
+   The host can materialize appPassword from configured env, file, exec, or store providers
+   on compatible OpenClaw versions. OpenClaw 2026.6.5 supports env, file, and exec references;
+   use a store-capable host (such as OpenClaw 2026.11.1 or later) for store references.
+   The plugin does not read secret files or run providers.
+   If you previously relied on the plugin reading ~/.openclaw/secrets.json directly, configure
+   a host file provider in OpenClaw and update the reference, or supply ICLOUD_APP_PASSWORD in
+   the gateway environment and omit appPassword. An explicit unresolved, malformed, or empty
+   appPassword never falls back to another credential. The legacy single `${ENV_VAR}` string form
+   continues to work when the named environment variable exists.
+
+   After installing the new SecretInput declaration, fully restart the gateway before testing a
+   newly configured provider. A targeted plugin reload may retain startup manifest metadata.
    The same app-specific password works for the calendar plugin.
 
 ## Configuration
@@ -81,8 +90,7 @@ openclaw plugins install clawhub:openclaw-icloud-contacts
 - **Apple vCard dialect.** vCard 3.0 only. Labels use Apple's `itemN.X-ABLabel` grouping and
   `_$!<Home>!$_` sentinels; standard labels map to TYPE params, custom labels round-trip as text.
   Unknown properties are preserved on update.
-- **Photos** are external URIs on iCloud; `photoUrl` is always returned, `includePhoto=true` fetches
-  it (authenticated) and returns base64. Photos larger than 5 MiB are not returned.
+- **Photos:** Without a configured group allowlist, full records can include an external photo URL and Get can return base64 on request. External photo responses are capped at 5 MiB. A configured group allowlist exposes only photo presence in full records, never photo URLs or bytes, and never fetches a separate photo.
 - **Response limits:** Each CardDAV fetch attempt, including reading its response, has a
   30-second deadline. Text responses are limited to 32 MiB per response. Oversized or
   incomplete responses fail without returning partial data.

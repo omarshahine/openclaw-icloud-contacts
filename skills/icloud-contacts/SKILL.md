@@ -25,7 +25,7 @@ with cheap delta syncs; searches run locally and are case-insensitive.
 | Tool | Use for |
 |------|---------|
 | `icloud_contacts_search` | Find people by name, email, phone (digits match any formatting), organization, or any. Start here. |
-| `icloud_contacts_get` | Full record for one contact by `id` (labeled emails/phones/addresses, IM, relations, social, dates, notes, groups, photoUrl). `includePhoto=true` adds base64. |
+| `icloud_contacts_get` | Full record for one contact by `id` (labeled emails/phones/addresses, IM, relations, social, dates, notes, groups, photoUrl). `includePhoto=true` adds base64 only when access is not group-scoped. In a configured group scope, all full results return only photo presence, never URLs or bytes. |
 | `icloud_contacts_list` | Browse (sorted by name) with `limit`/`offset`, optionally one `group`. |
 | `icloud_contacts_groups` | `list` groups, `members` of a group, `create`, `add`/`remove` contact ids, `delete`. |
 | `icloud_contacts_create` | New contact. Needs a name (givenName/familyName) or organization. |
